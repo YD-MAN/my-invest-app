@@ -1,7 +1,6 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np
 
 # =========================
 # 기본 설정
@@ -16,81 +15,69 @@ ASSETS = {
     "NASDAQ": "^IXIC",
     "S&P500": "^GSPC",
     "비트코인": "BTC-USD",
-    "삼성전자": "005930.KS",
     "엔비디아": "NVDA",
-    "테슬라": "TSLA"
+    "테슬라": "TSLA",
 }
 
 asset_name = st.selectbox("자산 선택", list(ASSETS.keys()))
 ticker = ASSETS[asset_name]
 
 # =========================
-# 데이터 로드
+# 데이터 로드 (가장 안전한 방식)
 # =========================
-data = yf.download(ticker, period="6mo", progress=False)
+raw = yf.download(
+    ticker,
+    period="6mo",
+    auto_adjust=True,
+    progress=False,
+    group_by="column"
+)
 
-if data.empty or len(data) < 60:
-    st.error("데이터가 충분하지 않습니다.")
+# 데이터 없으면 중단
+if raw.empty:
+    st.error("데이터를 불러오지 못했습니다.")
     st.stop()
 
 # =========================
-# 이동평균
+# 컬럼 정규화 (이게 핵심)
 # =========================
-data["MA20"] = data["Close"].rolling(20).mean()
-data["MA60"] = data["Close"].rolling(60).mean()
+# Close 컬럼이 있는 경우만 사용
+if "Close" not in raw.columns:
+    st.error("가격 데이터가 없습니다.")
+    st.stop()
 
-# =========================
-# RSI 계산 (완전 안정 버전)
-# =========================
-close = data["Close"].squeeze()
-delta = close.diff()
-
-gain = delta.where(delta > 0, 0.0)
-loss = -delta.where(delta < 0, 0.0)
-
-avg_gain = gain.rolling(14).mean()
-avg_loss = loss.rolling(14).mean()
-
-rs = avg_gain / avg_loss
-data["RSI"] = 100 - (100 / (1 + rs))
-
-# =========================
-# NaN 제거
-# =========================
+data = raw[["Close"]].copy()
 data = data.dropna()
 
-if len(data) < 21:
-    st.error("지표 계산 후 데이터가 부족합니다.")
+# 데이터 길이 체크
+if len(data) < 30:
+    st.error("분석에 필요한 데이터가 부족합니다.")
     st.stop()
 
 # =========================
-# 최근 값
+# 최근 수익률 계산
 # =========================
-latest_ma20 = data["MA20"].iloc[-1]
-latest_ma60 = data["MA60"].iloc[-1]
-latest_rsi = data["RSI"].iloc[-1]
+recent_return = (data["Close"].iloc[-1] / data["Close"].iloc[-21] - 1) * 100
+recent_return = float(recent_return)
 
 # =========================
-# 최근 1개월 수익률
+# 단순 추세 판단
 # =========================
-month_return = (data["Close"].iloc[-1] / data["Close"].iloc[-21] - 1) * 100
-month_return = float(month_return)
+ma_short = data["Close"].rolling(5).mean().iloc[-1]
+ma_long = data["Close"].rolling(20).mean().iloc[-1]
 
-# =========================
-# 판단 로직
-# =========================
-if latest_ma20 > latest_ma60 and latest_rsi < 70:
-    decision = "✅ 매수"
-elif latest_ma20 > latest_ma60:
-    decision = "⏸ 대기"
+if ma_short > ma_long:
+    decision = "✅ 상승 추세 (관심)"
 else:
-    decision = "❌ 매도"
+    decision = "⚠️ 약세 / 횡보"
 
 # =========================
 # 출력
 # =========================
 st.subheader(f"📌 오늘의 판단: {decision}")
-st.metric("최근 1개월 수익률", f"{month_return:.2f}%")
-st.metric("RSI", f"{latest_rsi:.1f}")
+st.metric("최근 1개월 수익률", f"{recent_return:.2f}%")
 
-st.line_chart(data[["Close", "MA20", "MA60"]])
+# =========================
+# 차트 (절대 안 깨지는 구조)
+# =========================
+st.line_chart(data)
