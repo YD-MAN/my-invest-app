@@ -24,13 +24,19 @@ data = yf.download(ticker, period="6mo")
 data["MA20"] = data["Close"].rolling(20).mean()
 data["MA60"] = data["Close"].rolling(60).mean()
 
-delta = data["Close"].diff()
-gain = np.where(delta > 0, delta, 0)
-loss = np.where(delta < 0, -delta, 0)
-avg_gain = pd.Series(gain).rolling(14).mean()
-avg_loss = pd.Series(loss).rolling(14).mean()
+close = data["Close"].squeeze()
+
+delta = close.diff()
+
+gain = delta.where(delta > 0, 0.0)
+loss = -delta.where(delta < 0, 0.0)
+
+avg_gain = gain.rolling(window=14).mean()
+avg_loss = loss.rolling(window=14).mean()
+
 rs = avg_gain / avg_loss
 data["RSI"] = 100 - (100 / (1 + rs))
+
 
 latest = data.iloc[-1]
 month_return = (data["Close"].iloc[-1] / data["Close"].iloc[-21] - 1) * 100
