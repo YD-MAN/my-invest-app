@@ -5,79 +5,69 @@ import pandas as pd
 # =========================
 # 기본 설정
 # =========================
-st.set_page_config(page_title="내 자산 기준 투자 판단 시스템", layout="centered")
+st.set_page_config(page_title="내 자산 기준 투자 판단 시스템", layout="wide")
+
 st.title("📊 내 자산 기준 투자 판단 시스템")
 
 # =========================
-# 자산 정의
+# 자산 선택
 # =========================
-ASSETS = {
+asset_dict = {
     "NASDAQ": "^IXIC",
     "S&P500": "^GSPC",
-    "비트코인": "BTC-USD",
-    "엔비디아": "NVDA",
-    "테슬라": "TSLA",
+    "BITCOIN": "BTC-USD"
 }
 
-asset_name = st.selectbox("자산 선택", list(ASSETS.keys()))
-ticker = ASSETS[asset_name]
+asset_name = st.selectbox("자산 선택", list(asset_dict.keys()))
+ticker = asset_dict[asset_name]
 
 # =========================
-# 데이터 로드 (가장 안전한 방식)
+# 데이터 불러오기
 # =========================
-raw = yf.download(
-    ticker,
-    period="6mo",
-    auto_adjust=True,
-    progress=False,
-    group_by="column"
-)
+@st.cache_data
+def load_data(ticker):
+    df = yf.download(ticker, period="1y")
+    df = df.reset_index()
+    return df
 
-# 데이터 없으면 중단
-if raw.empty:
+df = load_data(ticker)
+
+# 데이터 없을 때 방어
+if df.empty:
     st.error("데이터를 불러오지 못했습니다.")
     st.stop()
 
 # =========================
-# 컬럼 정규화 (이게 핵심)
+# 이동평균 계산
 # =========================
-# Close 컬럼이 있는 경우만 사용
-if "Close" not in raw.columns:
-    st.error("가격 데이터가 없습니다.")
-    st.stop()
-
-data = raw[["Close"]].copy()
-data = data.dropna()
-
-# 데이터 길이 체크
-if len(data) < 30:
-    st.error("분석에 필요한 데이터가 부족합니다.")
-    st.stop()
+df["MA20"] = df["Close"].rolling(window=20).mean()
+df["MA60"] = df["Close"].rolling(window=60).mean()
 
 # =========================
-# 최근 수익률 계산
+# 차트 표시
 # =========================
-recent_return = (data["Close"].iloc[-1] / data["Close"].iloc[-21] - 1) * 100
-recent_return = float(recent_return)
+st.subheader("📈 가격 & 이동평균")
+
+chart_df = df[["Date", "Close", "MA20", "MA60"]].dropna()
+chart_df = chart_df.set_index("Date")
+
+st.line_chart(chart_df, use_container_width=True)
 
 # =========================
-# 단순 추세 판단
+# 투자 판단 로직 (⚠️ 핵심)
 # =========================
-ma_short = data["Close"].rolling(5).mean().iloc[-1]
-ma_long = data["Close"].rolling(20).mean().iloc[-1]
+latest_ma20 = chart_df["MA20"].iloc[-1]
+latest_ma60 = chart_df["MA60"].iloc[-1]
 
-if ma_short > ma_long:
-    decision = "✅ 상승 추세 (관심)"
+st.subheader("🧠 투자 판단 결과")
+
+if latest_ma20 > latest_ma60:
+    st.success("📈 상승 추세 → **매수 고려**")
 else:
-    decision = "⚠️ 약세 / 횡보"
+    st.warning("📉 하락 추세 → **관망 / 매도 고려**")
 
 # =========================
-# 출력
+# 데이터 테이블 (선택)
 # =========================
-st.subheader(f"📌 오늘의 판단: {decision}")
-st.metric("최근 1개월 수익률", f"{recent_return:.2f}%")
-
-# =========================
-# 차트 (절대 안 깨지는 구조)
-# =========================
-st.line_chart(data)
+with st.expander("📄 원본 데이터 보기"):
+    st.dataframe(df.tail(20))
