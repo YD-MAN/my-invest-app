@@ -2,34 +2,49 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import smtplib
+import requests
+from email.mime.text import MIMEText
 
-st.set_page_config(page_title="투자 판단 시스템", layout="wide")
-st.title("📊 실전 투자 판단 시스템")
+st.set_page_config(page_title="장기 투자 비상 경보 시스템", layout="wide")
+st.title("🚨 장기 투자 관리 & 비상 경보 시스템")
 
-# =========================
-# 기본 설정
-# =========================
-ASSETS = {
-    "NASDAQ": "^IXIC",
-    "S&P500": "^GSPC",
-    "BITCOIN": "BTC-USD"
-}
+# =====================
+# 알림 함수
+# =====================
+def send_email(subject, body):
+    try:
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = st.secrets["EMAIL_USER"]
+        msg["To"] = st.secrets["EMAIL_USER"]
 
-PORTFOLIO_DEFAULT = {
-    "NASDAQ": 50,
-    "S&P500": 30,
-    "BITCOIN": 20
-}
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+        server.login(st.secrets["EMAIL_USER"], st.secrets["EMAIL_PASSWORD"])
+        server.send_message(msg)
+        server.quit()
+    except:
+        pass
 
-# =========================
+
+def send_telegram(message):
+    try:
+        url = f"https://api.telegram.org/bot{st.secrets['TELEGRAM_TOKEN']}/sendMessage"
+        data = {
+            "chat_id": st.secrets["TELEGRAM_CHAT_ID"],
+            "text": message
+        }
+        requests.post(url, data=data)
+    except:
+        pass
+
+
+# =====================
 # 데이터 로딩
-# =========================
+# =====================
 @st.cache_data
 def load_data(ticker):
-    df = yf.download(ticker, period="1y", progress=False)
-
-    if df.empty:
-        return None
+    df = yf.download(ticker, period="2y", progress=False)
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -37,159 +52,86 @@ def load_data(ticker):
     df = df.reset_index()
 
     if "Close" not in df.columns:
-        if "Adj Close" in df.columns:
-            df["Close"] = df["Adj Close"]
-        else:
-            return None
+        df["Close"] = df["Adj Close"]
 
-    return df
+    return df.dropna()
 
 
-# =========================
-# 기술적 지표 계산
-# =========================
+# =====================
+# 지표 계산
+# =====================
 def calculate_indicators(df):
     df["MA20"] = df["Close"].rolling(20).mean()
     df["MA60"] = df["Close"].rolling(60).mean()
+    df["MA120"] = df["Close"].rolling(120).mean()
 
     delta = df["Close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-
-    rs = avg_gain / avg_loss
+    rs = gain.rolling(14).mean() / loss.rolling(14).mean()
     df["RSI"] = 100 - (100 / (1 + rs))
 
-    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-
-    df["MACD"] = ema12 - ema26
-    df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-
-    return df
+    return df.dropna()
 
 
-# =========================
-# 분할 매수 계산
-# =========================
-def split_buy_plan(total_money, price, splits):
-    if splits == 3:
-        ratios = [0.4, 0.35, 0.25]
-        drops = [0.0, 0.05, 0.10]
-    else:
-        ratios = [0.3, 0.25, 0.2, 0.15, 0.1]
-        drops = [0.0, 0.03, 0.06, 0.09, 0.12]
+# =====================
+# Emergency 판단
+# =====================
+def emergency_check(df):
+    latest = df.iloc[-1]
+    recent_vol = df["Close"].pct_change().rolling(3).std().iloc[-1]
+    past_vol = df["Close"].pct_change().rolling(60).std().iloc[-1]
 
-    plan = []
-    for i in range(len(ratios)):
-        buy_price = price * (1 - drops[i])
-        invest_money = total_money * ratios[i]
-        qty = int(invest_money / buy_price)
+    structure_break = (
+        latest["Close"] < latest["MA120"]
+        and latest["MA20"] < latest["MA60"] < latest["MA120"]
+    )
 
-        plan.append({
-            "차수": f"{i+1}차",
-            "매수가": round(buy_price, 2),
-            "투입금액(원)": int(invest_money),
-            "매수수량": qty
-        })
+    volatility_shock = recent_vol > past_vol * 2
 
-    return pd.DataFrame(plan)
+    if structure_break and volatility_shock:
+        return True, "장기 추세 붕괴 + 변동성 쇼크"
+    return False, None
 
 
-# =========================
-# 손절 / 익절 계산
-# =========================
-def risk_management(avg_price):
-    stop_loss = avg_price * 0.93
-    take_profit = avg_price * 1.15
-    return stop_loss, take_profit
-
-
-# =========================
+# =====================
 # 사용자 입력
-# =========================
-st.sidebar.header("💼 투자 설정")
+# =====================
+st.sidebar.header("📥 보유 종목 입력")
 
-total_money = st.sidebar.number_input(
-    "총 투자금 (원)",
-    min_value=0,
-    value=10_000_000,
-    step=500_000
-)
+ticker = st.sidebar.text_input("티커 (예: QQQ, BTC-USD)")
+avg_price = st.sidebar.number_input("평균 매입가", min_value=0.0)
+quantity = st.sidebar.number_input("보유 수량", min_value=0.0)
 
-split_count = st.sidebar.selectbox(
-    "분할 매수 횟수",
-    [3, 5]
-)
-
-st.sidebar.subheader("📊 포트폴리오 비중 (%)")
-weights = {}
-total_weight = 0
-
-for asset, default in PORTFOLIO_DEFAULT.items():
-    w = st.sidebar.slider(asset, 0, 100, default)
-    weights[asset] = w
-    total_weight += w
-
-if total_weight != 100:
-    st.sidebar.error("❌ 비중 합계는 100%여야 합니다.")
-    st.stop()
-
-# =========================
-# 메인 로직
-# =========================
-for asset_name, ticker in ASSETS.items():
-    st.divider()
-    st.header(f"📌 {asset_name}")
-
-    df = load_data(ticker)
-    if df is None:
-        st.warning("데이터 로딩 실패")
-        continue
-
-    df = calculate_indicators(df)
-    df = df.dropna()
-    df = df.set_index("Date")
-
+if ticker:
+    df = calculate_indicators(load_data(ticker))
     current_price = df["Close"].iloc[-1]
-    ma20 = df["MA20"].iloc[-1]
-    ma60 = df["MA60"].iloc[-1]
-    rsi = df["RSI"].iloc[-1]
-    macd = df["MACD"].iloc[-1]
-    signal = df["Signal"].iloc[-1]
+    pnl = (current_price - avg_price) / avg_price * 100
 
-    st.line_chart(df[["Close", "MA20", "MA60"]])
+    st.metric("현재가", f"{current_price:,.2f}")
+    st.metric("수익률", f"{pnl:.2f}%")
 
-    # 투자 판단 점수
-    score = 0
-    if ma20 > ma60:
-        score += 1
-    if rsi < 70:
-        score += 1
-    if macd > signal:
-        score += 1
+    # Emergency 판단
+    emergency, reason = emergency_check(df)
 
-    if score == 3:
-        st.success("✅ 매수 우위")
-    elif score == 2:
-        st.warning("⚠️ 관망")
+    st.line_chart(df.set_index("Date")[["Close", "MA20", "MA60", "MA120"]])
+
+    if emergency:
+        st.error(f"🚨 비상 경보 발생: {reason}")
+
+        message = f"""
+🚨 EMERGENCY ALERT 🚨
+종목: {ticker}
+사유: {reason}
+현재가: {current_price:,.2f}
+수익률: {pnl:.2f}%
+
+계좌 보호를 위한 방어적 대응을 권고합니다.
+"""
+
+        send_email("🚨 투자 비상 경보", message)
+        send_telegram(message)
+
     else:
-        st.error("❌ 보수적 접근")
-
-    # 자산별 투자금
-    asset_money = total_money * (weights[asset_name] / 100)
-
-    st.subheader("📦 분할 매수 계획")
-    plan_df = split_buy_plan(asset_money, current_price, split_count)
-    st.dataframe(plan_df, use_container_width=True)
-
-    avg_price = plan_df["매수가"].mean()
-    stop_loss, take_profit = risk_management(avg_price)
-
-    st.subheader("🛡 리스크 관리")
-    st.write(f"평균 매입가: **{avg_price:,.2f}**")
-    st.write(f"손절 기준: **{stop_loss:,.2f} (-7%)**")
-    st.write(f"익절 기준: **{take_profit:,.2f} (+15%)**")
-
+        st.success("🟢 장기 투자 전제 유지 중 (비상 신호 없음)")
