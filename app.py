@@ -26,27 +26,45 @@ data["MA60"] = data["Close"].rolling(60).mean()
 
 close = data["Close"].squeeze()
 
+# ===== 데이터 안전성 체크 =====
+if data.empty or len(data) < 60:
+    st.warning("데이터가 충분하지 않습니다.")
+    st.stop()
+
+close = data["Close"].squeeze()
+
+# ===== RSI 계산 (안정 버전) =====
 delta = close.diff()
 
 gain = delta.where(delta > 0, 0.0)
 loss = -delta.where(delta < 0, 0.0)
 
-avg_gain = gain.rolling(window=14).mean()
-avg_loss = loss.rolling(window=14).mean()
+avg_gain = gain.rolling(14).mean()
+avg_loss = loss.rolling(14).mean()
 
 rs = avg_gain / avg_loss
-data["RSI"] = 100 - (100 / (1 + rs))
+rsi = 100 - (100 / (1 + rs))
 
+data["RSI"] = rsi
 
-latest = data.iloc[-1]
+# ===== NaN 제거 =====
+data = data.dropna()
+
+# ===== 최신 데이터 =====
+latest_close = data["Close"].iloc[-1]
+latest_rsi = data["RSI"].iloc[-1]
+
+# ===== 최근 1개월 수익률 =====
 month_return = (data["Close"].iloc[-1] / data["Close"].iloc[-21] - 1) * 100
 
-if latest["MA20"] > latest["MA60"] and month_return < 15 and latest["RSI"] < 70:
+if data["MA20"].iloc[-1] > data["MA60"].iloc[-1] and latest_rsi < 70:
     decision = "✅ 매수"
-elif latest["MA20"] > latest["MA60"]:
+elif data["MA20"].iloc[-1] > data["MA60"].iloc[-1]:
     decision = "⏸ 대기"
 else:
     decision = "❌ 매도"
+
+
 
 st.subheader(f"📌 오늘의 판단: {decision}")
 st.metric("최근 1개월 수익률", f"{month_return:.2f}%")
