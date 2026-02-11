@@ -1,50 +1,41 @@
 import streamlit as st
 import pandas as pd
-import yfinance as yf
 import numpy as np
+import yfinance as yf
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.linear_model import LinearRegression
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+import warnings
+warnings.filterwarnings("ignore")
 
-st.set_page_config(page_title="AI 포트폴리오 매니저", layout="wide")
+st.set_page_config(layout="wide")
+st.title("📊 AI 포트폴리오 매니저 (ML + 리밸런싱 통합판)")
 
-st.title("📊 AI 포트폴리오 매니저 (완전 방어형 최종판)")
-
-# -------------------------
-# 입력 영역
-# -------------------------
-st.header("📌 종목 입력")
-
-tickers_input = st.text_input(
-    "종목코드 (쉼표 구분, 국내 .KS)",
-    "005930.KS, NVDA, QQQ"
-)
-
-avg_prices_input = st.text_input(
-    "평단가 (쉼표 구분)",
-    "64000, 450, 400"
-)
-
-qty_input = st.text_input(
-    "보유 수량 (쉼표 구분)",
-    "10, 5, 8"
-)
+# -----------------------------
+# 입력
+# -----------------------------
+tickers_input = st.text_input("종목코드 (.KS 포함)", "005930.KS, NVDA, QQQ")
+avg_input = st.text_input("평단가", "64000, 450, 400")
+qty_input = st.text_input("보유 수량", "10, 5, 8")
 
 tickers = [t.strip() for t in tickers_input.split(",")]
-avg_prices = [float(x.strip()) for x in avg_prices_input.split(",")]
+avg_prices = [float(x.strip()) for x in avg_input.split(",")]
 quantities = [float(x.strip()) for x in qty_input.split(",")]
 
-portfolio_data = []
+portfolio_rows = []
 
-# -------------------------
-# 종목별 안전 다운로드
-# -------------------------
+# -----------------------------
+# 종목별 처리
+# -----------------------------
 for i, ticker in enumerate(tickers):
     try:
-        df = yf.download(ticker, period="3mo", interval="1d", auto_adjust=True)
+        df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True)
 
-        if df.empty or len(df) < 30:
+        if df.empty or len(df) < 60:
             continue
 
-        close = df["Close"]
+        close = df["Close"].dropna()
         current_price = float(close.iloc[-1])
 
         avg_price = avg_prices[i]
@@ -52,103 +43,140 @@ for i, ticker in enumerate(tickers):
 
         value = current_price * qty
         profit = (current_price - avg_price) * qty
-        return_pct = ((current_price - avg_price) / avg_price) * 100
+        return_pct = (current_price - avg_price) / avg_price * 100
 
-        # 이동평균
+        # -----------------------------
+        # 기술지표
+        # -----------------------------
         ma5 = close.rolling(5).mean()
         ma20 = close.rolling(20).mean()
+        trend30 = (close.iloc[-1] - close.iloc[-30]) / close.iloc[-30] * 100
+        volatility = close.pct_change().std() * 100
 
-        # 매수/매도 판단
+        score = 50
+
         if ma5.iloc[-1] > ma20.iloc[-1]:
+            score += 20
             signal = "📈 매수 우위"
-            score = 70
         else:
-            signal = "📉 매도/관망"
-            score = 40
+            score -= 10
+            signal = "📉 관망"
 
-        # 30일 추세
-        trend_30 = ((close.iloc[-1] - close.iloc[-30]) / close.iloc[-30]) * 100
-
-        if trend_30 > 5:
+        if trend30 > 5:
             score += 15
-        elif trend_30 < -5:
+        elif trend30 < -5:
             score -= 15
 
-        # 변동성
-        volatility = close.pct_change().std() * 100
         if volatility < 2:
             score += 10
 
-        # 단순 예측 (회귀)
-        X = np.arange(len(close)).reshape(-1, 1)
-        y = close.values
-        model = LinearRegression().fit(X, y)
-        future = model.predict([[len(close) + 5]])[0]
+        # -----------------------------
+        # LSTM 예측
+        # -----------------------------
+        try:
+            scaler = MinMaxScaler()
+            scaled = scaler.fit_transform(close.values.reshape(-1,1))
 
-        portfolio_data.append([
+            X, y = [], []
+            lookback = 20
+            for j in range(lookback, len(scaled)):
+                X.append(scaled[j-lookback:j])
+                y.append(scaled[j])
+
+            X, y = np.array(X), np.array(y)
+
+            model = Sequential()
+            model.add(LSTM(32, input_shape=(X.shape[1],1)))
+            model.add(Dense(1))
+            model.compile(loss="mse", optimizer="adam")
+
+            model.fit(X, y, epochs=5, batch_size=16, verbose=0)
+
+            last_seq = scaled[-lookback:]
+            last_seq = np.reshape(last_seq,(1,lookback,1))
+            pred_scaled = model.predict(last_seq, verbose=0)
+            pred_price = scaler.inverse_transform(pred_scaled)[0][0]
+
+        except:
+            # fallback 선형회귀
+            X_lr = np.arange(len(close)).reshape(-1,1)
+            y_lr = close.values
+            lr = LinearRegression().fit(X_lr,y_lr)
+            pred_price = lr.predict([[len(close)+5]])[0]
+
+        portfolio_rows.append([
             ticker, avg_price, current_price, qty,
             value, profit, return_pct,
-            signal, trend_30, score, future
+            signal, trend30, score, pred_price
         ])
 
     except:
         continue
 
-# -------------------------
-# 데이터프레임 구성
-# -------------------------
-columns = [
-    "Ticker", "평단가", "현재가", "보유수량",
-    "총평가금액", "평가손익", "수익률(%)",
-    "매매신호", "30일추세(%)", "AI점수", "5일예측가"
+cols = [
+    "Ticker","평단가","현재가","보유수량",
+    "총평가금액","평가손익","수익률(%)",
+    "매매신호","30일추세(%)","AI점수","예측가"
 ]
 
-portfolio = pd.DataFrame(portfolio_data, columns=columns)
+portfolio = pd.DataFrame(portfolio_rows, columns=cols)
 
 if portfolio.empty:
-    st.error("데이터를 불러올 수 없습니다. 종목코드를 확인하세요.")
+    st.error("데이터 부족 또는 종목 오류")
     st.stop()
 
 total_asset = portfolio["총평가금액"].sum()
-portfolio["비중(%)"] = portfolio["총평가금액"] / total_asset * 100
+portfolio["비중(%)"] = portfolio["총평가금액"]/total_asset*100
 
-# -------------------------
-# 📊 현재 자산 현황
-# -------------------------
+# -----------------------------
+# 현재 자산
+# -----------------------------
 st.header("💰 현재 자산 현황")
 
-col1, col2, col3 = st.columns(3)
-
-col1.metric("총 자산", f"{total_asset:,.0f} 원")
-col2.metric("총 손익", f"{portfolio['평가손익'].sum():,.0f} 원")
+col1,col2,col3 = st.columns(3)
+col1.metric("총 자산", f"{total_asset:,.0f}")
+col2.metric("총 손익", f"{portfolio['평가손익'].sum():,.0f}")
 col3.metric("평균 수익률", f"{portfolio['수익률(%)'].mean():.2f}%")
 
 st.dataframe(portfolio.round(2), use_container_width=True)
 
-# -------------------------
-# 📈 월별 추이
-# -------------------------
+# -----------------------------
+# 📈 자산 추이
+# -----------------------------
 st.header("📈 자산 추이")
 
-trend_total = []
+trend_list = []
+for i,ticker in enumerate(portfolio["Ticker"]):
+    df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True)
+    trend_list.append(df["Close"] * portfolio.iloc[i]["보유수량"])
 
-for ticker in tickers:
-    try:
-        df = yf.download(ticker, period="3mo", interval="1d", auto_adjust=True)
-        trend_total.append(df["Close"] * quantities[tickers.index(ticker)])
-    except:
-        continue
+trend_df = pd.concat(trend_list, axis=1).sum(axis=1)
+st.line_chart(trend_df)
 
-combined = pd.concat(trend_total, axis=1).sum(axis=1)
-st.line_chart(combined)
+# -----------------------------
+# 🔁 자동 리밸런싱
+# -----------------------------
+st.header("🔁 AI 리밸런싱 추천")
 
-# -------------------------
-# 🤖 AI 요약
-# -------------------------
+score_sum = portfolio["AI점수"].sum()
+portfolio["목표비중(%)"] = portfolio["AI점수"]/score_sum*100
+
+portfolio["목표금액"] = total_asset * portfolio["목표비중(%)"]/100
+portfolio["조정금액"] = portfolio["목표금액"] - portfolio["총평가금액"]
+portfolio["조정수량"] = portfolio["조정금액"]/portfolio["현재가"]
+
+st.dataframe(
+    portfolio[["Ticker","비중(%)","목표비중(%)","조정수량"]].round(2),
+    use_container_width=True
+)
+
+# -----------------------------
+# 종합 판단
+# -----------------------------
 st.header("🤖 AI 종합 판단")
 
-best_stock = portfolio.sort_values("AI점수", ascending=False).iloc[0]
-worst_stock = portfolio.sort_values("AI점수").iloc[0]
+best = portfolio.sort_values("AI점수",ascending=False).iloc[0]
+worst = portfolio.sort_values("AI점수").iloc[0]
 
-st.success(f"📌 매수 우선 검토: {best_stock['Ticker']} (점수 {best_stock['AI점수']})")
-st.warning(f"⚠ 리스크 관리 필요: {worst_stock['Ticker']} (점수 {worst_stock['AI점수']})")
+st.success(f"📌 매수 우선: {best['Ticker']} (점수 {best['AI점수']})")
+st.warning(f"⚠ 비중 축소 고려: {worst['Ticker']} (점수 {worst['AI점수']})")
