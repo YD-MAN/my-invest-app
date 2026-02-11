@@ -1,129 +1,165 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
 import yfinance as yf
-from streamlit_autorefresh import st_autorefresh
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime
 
-st.set_page_config(page_title="AI 포트폴리오 매니저", layout="centered")
-st.title("📊 AI 포트폴리오 매니저 (실시간 자동 갱신)")
+st.set_page_config(page_title="AI 포트폴리오 매니저", layout="wide")
 
-# -----------------------------
-# 공식 자동 새로고침 (60초)
-# -----------------------------
-st_autorefresh(interval=60000, key="datarefresh")
+st.title("📊 AI 포트폴리오 매니저 (완전 안정화 버전)")
 
-# -----------------------------
-# 세션 상태
-# -----------------------------
-if "portfolio" not in st.session_state:
-    st.session_state.portfolio = []
+# 자동 새로고침 (Streamlit 기본 방식)
+if "refresh" not in st.session_state:
+    st.session_state.refresh = 0
 
-# -----------------------------
-# 초기화 버튼
-# -----------------------------
-if st.button("🧹 전체 초기화"):
-    st.session_state.portfolio = []
-    st.success("포트폴리오 초기화 완료")
+st.session_state.refresh += 1
 
-st.markdown("---")
-
-# -----------------------------
+# ----------------------------
 # 종목 입력
-# -----------------------------
-st.subheader("➕ 종목 입력 (평단 기준, 현재가 자동 조회)")
+# ----------------------------
 
-col1, col2 = st.columns(2)
+st.header("📌 종목 입력")
 
-with col1:
-    name = st.text_input("종목명", placeholder="삼성전자")
-    code = st.text_input("종목코드", placeholder="005930.KS 또는 AAPL")
+ticker_input = st.text_area(
+    "종목코드 입력 (쉼표로 구분, 국내주식은 .KS 또는 .KQ 붙이기)",
+    "AAPL, MSFT, 005930.KS"
+)
 
-with col2:
-    qty = st.number_input("보유 수량", min_value=0.0, step=1.0)
-    avg_price = st.number_input("평단가", min_value=0, step=100)
+avg_price_input = st.text_area(
+    "평단가 입력 (위 종목 순서대로, 쉼표로 구분)",
+    "150, 300, 70000"
+)
 
-if st.button("종목 추가"):
-    st.session_state.portfolio.append({
-        "종목명": name,
-        "종목코드": code,
-        "보유수량": qty,
-        "평단가": avg_price
-    })
-    st.success("종목 추가 완료")
+tickers = [t.strip() for t in ticker_input.split(",")]
+avg_prices = [float(p.strip()) for p in avg_price_input.split(",")]
 
-# -----------------------------
-# 실시간 가격 조회
-# -----------------------------
-@st.cache_data(ttl=60)
-def get_current_price(ticker):
-    try:
-        stock = yf.Ticker(ticker)
-        data = stock.history(period="1d")
-        if not data.empty:
-            return round(data["Close"].iloc[-1], 2)
-        else:
-            return None
-    except:
-        return None
+# ----------------------------
+# 실시간 데이터 수집
+# ----------------------------
 
-# -----------------------------
-# 포트폴리오 분석
-# -----------------------------
-if st.session_state.portfolio:
-    df = pd.DataFrame(st.session_state.portfolio)
+data = yf.download(tickers, period="3mo", interval="1d", auto_adjust=True)
 
-    current_prices = []
-    profit_rates = []
-    signals = []
+if len(tickers) == 1:
+    data = pd.DataFrame({tickers[0]: data["Close"]})
+else:
+    data = data["Close"]
 
-    for _, row in df.iterrows():
-        price = get_current_price(row["종목코드"])
-        current_prices.append(price)
+latest_prices = data.iloc[-1]
 
-        if price is not None and row["평단가"] > 0:
-            profit = (price - row["평단가"]) / row["평단가"] * 100
-        else:
-            profit = 0
+# ----------------------------
+# 포트폴리오 계산
+# ----------------------------
 
-        profit_rates.append(round(profit, 2))
+portfolio = pd.DataFrame({
+    "Ticker": tickers,
+    "평단가": avg_prices,
+    "현재가": latest_prices.values
+})
 
-        if profit <= -10:
-            signal = "🔵 추가매수 고려"
-        elif profit >= 20:
-            signal = "🔴 분할매도 고려"
-        else:
-            signal = "🟡 보유"
+portfolio["수익률(%)"] = ((portfolio["현재가"] - portfolio["평단가"]) / portfolio["평단가"]) * 100
 
-        signals.append(signal)
+portfolio["평가금액"] = portfolio["현재가"]
+total_value = portfolio["평가금액"].sum()
+portfolio["비중(%)"] = (portfolio["평가금액"] / total_value) * 100
 
-    df["현재가"] = current_prices
-    df["수익률(%)"] = profit_rates
-    df["매매신호"] = signals
-    df["평가금액"] = df["보유수량"] * df["현재가"]
+st.subheader("💰 수익 현황")
+st.dataframe(portfolio.round(2), use_container_width=True)
 
-    st.markdown("---")
-    st.subheader("📋 실시간 수익 현황 & 매매 판단")
-    st.dataframe(df, use_container_width=True)
+# ----------------------------
+# 📊 종목별 비중 파이차트
+# ----------------------------
 
-    st.markdown("---")
-    st.subheader("📈 종목별 수익률")
+fig_pie = px.pie(
+    portfolio,
+    names="Ticker",
+    values="비중(%)",
+    title="📊 종목별 비중"
+)
 
-    fig, ax = plt.subplots()
-    ax.bar(df["종목명"], df["수익률(%)"])
-    ax.axhline(0)
-    ax.set_ylabel("수익률 (%)")
-    ax.grid(True)
+st.plotly_chart(fig_pie, use_container_width=True)
 
-    st.pyplot(fig)
+# ----------------------------
+# 📈 월별 자산 추이
+# ----------------------------
 
-    st.markdown("---")
-    st.subheader("🧠 포트폴리오 종합 판단")
+monthly = data.resample("M").last()
+portfolio_trend = monthly.sum(axis=1)
 
-    avg_return = df["수익률(%)"].mean()
+fig_trend = go.Figure()
+fig_trend.add_trace(go.Scatter(
+    x=portfolio_trend.index,
+    y=portfolio_trend.values,
+    mode="lines",
+    name="총 자산"
+))
 
-    if avg_return >= 15:
-        st.success("전체 수익 구간. 일부 분할매도 고려 가능.")
-    elif avg_return <= -10:
-        st.warning("손실 구간. 리밸런싱 또는 추가매수 검토.")
+fig_trend.update_layout(title="📈 월별 자산 추이")
+st.plotly_chart(fig_trend, use_container_width=True)
+
+# ----------------------------
+# 📊 이동평균 매수 판단 + AI 점수
+# ----------------------------
+
+st.header("🤖 AI 분석 결과")
+
+analysis_results = []
+
+for ticker in tickers:
+    df = yf.download(ticker, period="3mo", interval="1d", auto_adjust=True)
+    close = df["Close"]
+
+    ma5 = close.rolling(5).mean()
+    ma20 = close.rolling(20).mean()
+
+    score = 0
+
+    # 1️⃣ 이동평균 매수 시그널
+    if ma5.iloc[-1] > ma20.iloc[-1]:
+        signal = "📈 단기 상승 (매수 유리)"
+        score += 40
     else:
-        st.info("중립 구간. 추이 관찰 권장.")
+        signal = "📉 하락 추세 (관망)"
+        score -= 20
+
+    # 2️⃣ 최근 30일 추세
+    change_30 = ((close.iloc[-1] - close.iloc[-30]) / close.iloc[-30]) * 100
+    if change_30 > 5:
+        trend_warn = "✅ 상승 추세"
+        score += 30
+    elif change_30 < -5:
+        trend_warn = "⚠ 하락 경고"
+        score -= 30
+    else:
+        trend_warn = "➖ 횡보"
+
+    # 3️⃣ 변동성 기반 점수
+    volatility = close.pct_change().std() * 100
+    if volatility < 2:
+        score += 30
+    else:
+        score -= 10
+
+    analysis_results.append([ticker, signal, trend_warn, score])
+
+analysis_df = pd.DataFrame(
+    analysis_results,
+    columns=["Ticker", "이동평균 판단", "30일 추세", "AI 점수"]
+)
+
+st.dataframe(analysis_df, use_container_width=True)
+
+# ----------------------------
+# 📱 요약 카드 모드
+# ----------------------------
+
+st.header("📲 홈 요약 카드")
+
+col1, col2, col3 = st.columns(3)
+
+col1.metric("총 자산 가치", f"{total_value:,.0f}")
+col2.metric("평균 수익률", f"{portfolio['수익률(%)'].mean():.2f}%")
+col3.metric("최고 AI 점수", f"{analysis_df['AI 점수'].max()}")
+
+st.caption("※ 1분마다 새로고침하면 실시간 데이터 반영됩니다.")
