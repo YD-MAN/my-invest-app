@@ -18,7 +18,7 @@ def safe_float_list(s: str):
     for item in s.split(","):
         try:
             out.append(float(item.strip()))
-        except:
+        except Exception:
             out.append(0.0)
     return out
 
@@ -47,7 +47,7 @@ def calculate_risk(vol: float) -> str:
         return "높음"
 
 def calculate_ai_score(trend: float, vol: float, mom: float) -> int:
-    score = (trend * 200) + ((1 - vol) * 30) + (mom * 100) + 20
+    score = (trend * 200.0) + ((1.0 - vol) * 30.0) + (mom * 100.0) + 20.0
     return int(np.clip(score, 0, 100))
 
 # ---------------------------
@@ -59,7 +59,12 @@ for i in range(max_len):
         continue
 
     try:
-        data = yf.download(ticker, period="3mo", progress=False, auto_adjust=False)
+        data = yf.download(
+            ticker,
+            period="3mo",
+            progress=False,
+            auto_adjust=False
+        )
     except Exception as e:
         st.warning(f"{ticker} 다운로드 실패: {e}")
         continue
@@ -72,6 +77,77 @@ for i in range(max_len):
         st.warning(f"{ticker} 종가(Close) 없음")
         continue
 
-    # ✅ Close를 항상 1차원 Series로 정규화
+    # ✅ Close를 항상 1차원 Series로 정규화 (들여쓰기/타입 이슈 방어)
     close = data["Close"]
-    if isinstance(close, pd.DataFrame):   # (가끔
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    close = close.dropna()
+
+    if len(close) < 5:
+        st.warning(f"{ticker} 데이터 부족")
+        continue
+
+    current_price = float(close.iloc[-1])
+    buy_price = float(buy_prices[i])
+    qty = float(quantities[i])
+
+    # 손익률
+    if buy_price == 0.0:
+        change_pct = 0.0
+    else:
+        change_pct = ((current_price - buy_price) / buy_price) * 100.0
+
+    # 변동성
+    returns = close.pct_change().dropna()
+    volatility = float(returns.std()) if len(returns) > 0 else 0.0
+
+    # 추세 (ma20, ma60) + NaN/0 방어
+    ma20 = close.rolling(20).mean().iloc[-1]
+    ma60 = close.rolling(60).mean().iloc[-1] if len(close) >= 60 else ma20
+
+    if pd.isna(ma20) or pd.isna(ma60) or float(ma60) == 0.0:
+        trend = 0.0
+    else:
+        trend = float((ma20 - ma60) / ma60)
+
+    # 모멘텀
+    first_price = float(close.iloc[0])
+    if first_price == 0.0:
+        momentum = 0.0
+    else:
+        momentum = float((current_price - first_price) / first_price)
+
+    ai_score = calculate_ai_score(trend, volatility, momentum)
+    risk = calculate_risk(volatility)
+
+    # 색상 처리
+    if change_pct > 0:
+        color = "red"
+        arrow = "▲"
+    elif change_pct < 0:
+        color = "blue"
+        arrow = "▼"
+    else:
+        color = "gray"
+        arrow = ""
+
+    # 평가손익
+    pnl = (current_price - buy_price) * qty if buy_price != 0.0 else 0.0
+
+    st.markdown(
+        f"""
+---
+### {ticker}
+현재가: ${current_price:.2f}  
+평단가: ${buy_price:.2f} / 수량: {qty:g}  
+평가손익: ${pnl:,.2f}  
+
+<span style='color:{color}; font-size:20px; font-weight:bold;'>
+{arrow} {change_pct:.2f}%
+</span>  
+
+AI 점수: {ai_score}점  
+리스크: {risk}
+""",
+        unsafe_allow_html=True
+    )
