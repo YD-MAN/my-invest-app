@@ -14,14 +14,18 @@ buy_prices_input = st.text_input("평단가", "150, 300, 400")
 quantities_input = st.text_input("수량", "10, 5, 3")
 
 
-def safe_float_list(s):
-    result = []
+def safe_float_list(s: str) -> list[float]:
+    out: list[float] = []
     for item in s.split(","):
+        item = item.strip()
+        if not item:
+            out.append(0.0)
+            continue
         try:
-            result.append(float(item.strip()))
-        except:
-            result.append(0.0)
-    return result
+            out.append(float(item))
+        except Exception:
+            out.append(0.0)
+    return out
 
 
 tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
@@ -29,7 +33,6 @@ buy_prices = safe_float_list(buy_prices_input)
 quantities = safe_float_list(quantities_input)
 
 max_len = max(len(tickers), len(buy_prices), len(quantities))
-
 while len(tickers) < max_len:
     tickers.append("")
 while len(buy_prices) < max_len:
@@ -39,19 +42,65 @@ while len(quantities) < max_len:
 
 
 # ---------------------------
-# 점수 계산
+# 유틸: Close를 "항상 Series"로 뽑기 (멀티인덱스/데이터프레임 방어)
 # ---------------------------
-def calculate_risk(vol):
+def extract_close_series(data: pd.DataFrame) -> pd.Series | None:
+    if data is None or len(data) == 0:
+        return None
+
+    # yfinance가 MultiIndex 컬럼으로 주는 경우 방어
+    if isinstance(data.columns, pd.MultiIndex):
+        # 보통 level=0에 'Close'가 있고 level=1에 티커가 있음
+        if "Close" not in data.columns.get_level_values(0):
+            return None
+        close_part = data.xs("Close", axis=1, level=0, drop_level=True)
+
+        # close_part가 DataFrame(여러 컬럼)일 수 있음 -> 첫 컬럼 선택
+        if isinstance(close_part, pd.DataFrame):
+            if close_part.shape[1] == 0:
+                return None
+            close = close_part.iloc[:, 0]
+        else:
+            close = close_part
+
+    else:
+        if "Close" not in data.columns:
+            return None
+        close = data["Close"]
+        if isinstance(close, pd.DataFrame):
+            if close.shape[1] == 0:
+                return None
+            close = close.iloc[:, 0]
+
+    # 최종적으로 Series 보장
+    if not isinstance(close, pd.Series):
+        try:
+            close = close.squeeze()
+        except Exception:
+            return None
+        if not isinstance(close, pd.Series):
+            return None
+
+    close = close.dropna()
+    if len(close) == 0:
+        return None
+
+    return close
+
+
+# ---------------------------
+# 리스크/점수
+# ---------------------------
+def calculate_risk(vol: float) -> str:
     if vol < 0.02:
         return "낮음"
-    elif vol < 0.05:
+    if vol < 0.05:
         return "보통"
-    else:
-        return "높음"
+    return "높음"
 
 
-def calculate_ai_score(trend, vol, mom):
-    score = (trend * 200) + ((1 - vol) * 30) + (mom * 100) + 20
+def calculate_ai_score(trend: float, vol: float, mom: float) -> int:
+    score = (trend * 200.0) + ((1.0 - vol) * 30.0) + (mom * 100.0) + 20.0
     return int(np.clip(score, 0, 100))
 
 
@@ -59,64 +108,63 @@ def calculate_ai_score(trend, vol, mom):
 # 처리
 # ---------------------------
 for i in range(max_len):
-
     ticker = tickers[i]
     if ticker == "":
         continue
 
     try:
-        data = yf.download(ticker, period="3mo", progress=False)
-    except:
-        st.warning(f"{ticker} 다운로드 실패")
+        data = yf.download(
+            ticker,
+            period="3mo",
+            progress=False,
+            auto_adjust=False,
+        )
+    except Exception as e:
+        st.warning(f"{ticker} 다운로드 실패: {e}")
         continue
 
-    if data is None or len(data) == 0:
-        st.warning(f"{ticker} 데이터 없음")
-        continue
-
-    if "Close" not in data.columns:
-        st.warning(f"{ticker} 종가 없음")
-        continue
-
-    close = data["Close"].dropna()
-
-    if len(close) < 5:
-        st.warning(f"{ticker} 데이터 부족")
+    close = extract_close_series(data)
+    if close is None or len(close) < 5:
+        st.warning(f"{ticker} 데이터 부족/종가 없음")
         continue
 
     current_price = float(close.iloc[-1])
     buy_price = float(buy_prices[i])
     qty = float(quantities[i])
 
-    if buy_price == 0:
-        change_pct = 0
+    # 손익률
+    if buy_price == 0.0:
+        change_pct = 0.0
     else:
-        change_pct = ((current_price - buy_price) / buy_price) * 100
+        change_pct = ((current_price - buy_price) / buy_price) * 100.0
 
     # 변동성
     returns = close.pct_change().dropna()
-    volatility = float(returns.std()) if len(returns) > 0 else 0
+    volatility = float(returns.std()) if len(returns) > 0 else 0.0
 
-    # 추세
-    ma20 = close.rolling(20).mean().iloc[-1]
-    ma60 = close.rolling(60).mean().iloc[-1] if len(close) >= 60 else ma20
-
-    if pd.isna(ma20) or pd.isna(ma60) or ma60 == 0:
-        trend = 0
+    # 추세: ma20/ma60을 "반드시 float"로 만들기
+    ma20_val = close.rolling(20).mean().iloc[-1]
+    if len(close) >= 60:
+        ma60_val = close.rolling(60).mean().iloc[-1]
     else:
-        trend = float((ma20 - ma60) / ma60)
+        ma60_val = ma20_val
+
+    ma20 = float(ma20_val) if pd.notna(ma20_val) else np.nan
+    ma60 = float(ma60_val) if pd.notna(ma60_val) else np.nan
+
+    if np.isnan(ma20) or np.isnan(ma60) or ma60 == 0.0:
+        trend = 0.0
+    else:
+        trend = (ma20 - ma60) / ma60
 
     # 모멘텀
     first_price = float(close.iloc[0])
-    if first_price == 0:
-        momentum = 0
-    else:
-        momentum = (current_price - first_price) / first_price
+    momentum = 0.0 if first_price == 0.0 else (current_price - first_price) / first_price
 
     ai_score = calculate_ai_score(trend, volatility, momentum)
     risk = calculate_risk(volatility)
 
-    # 색상
+    # 색상 처리
     if change_pct > 0:
         color = "red"
         arrow = "▲"
@@ -127,9 +175,10 @@ for i in range(max_len):
         color = "gray"
         arrow = ""
 
-    pnl = (current_price - buy_price) * qty if buy_price != 0 else 0
+    pnl = 0.0 if buy_price == 0.0 else (current_price - buy_price) * qty
 
-    st.markdown(f"""
+    st.markdown(
+        f"""
 ---
 ### {ticker}
 현재가: ${current_price:.2f}  
@@ -142,4 +191,6 @@ for i in range(max_len):
 
 AI 점수: {ai_score}점  
 리스크: {risk}
-""", unsafe_allow_html=True)
+""",
+        unsafe_allow_html=True,
+    )
