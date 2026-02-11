@@ -2,15 +2,15 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 import yfinance as yf
-import time
+from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="AI 포트폴리오 매니저", layout="centered")
 st.title("📊 AI 포트폴리오 매니저 (실시간 자동 갱신)")
 
 # -----------------------------
-# 자동 새로고침 (60초)
+# 공식 자동 새로고침 (60초)
 # -----------------------------
-st.experimental_autorefresh(interval=60000, key="refresh")
+st_autorefresh(interval=60000, key="datarefresh")
 
 # -----------------------------
 # 세션 상태
@@ -19,7 +19,7 @@ if "portfolio" not in st.session_state:
     st.session_state.portfolio = []
 
 # -----------------------------
-# 초기화
+# 초기화 버튼
 # -----------------------------
 if st.button("🧹 전체 초기화"):
     st.session_state.portfolio = []
@@ -28,9 +28,9 @@ if st.button("🧹 전체 초기화"):
 st.markdown("---")
 
 # -----------------------------
-# 종목 입력 (평단 기준)
+# 종목 입력
 # -----------------------------
-st.subheader("➕ 종목 입력 (실시간 가격 자동 반영)")
+st.subheader("➕ 종목 입력 (평단 기준, 현재가 자동 조회)")
 
 col1, col2 = st.columns(2)
 
@@ -52,7 +52,7 @@ if st.button("종목 추가"):
     st.success("종목 추가 완료")
 
 # -----------------------------
-# 실시간 주가 조회 함수
+# 실시간 가격 조회
 # -----------------------------
 @st.cache_data(ttl=60)
 def get_current_price(ticker):
@@ -76,18 +76,17 @@ if st.session_state.portfolio:
     profit_rates = []
     signals = []
 
-    for i, row in df.iterrows():
+    for _, row in df.iterrows():
         price = get_current_price(row["종목코드"])
         current_prices.append(price)
 
-        if price and row["평단가"] > 0:
+        if price is not None and row["평단가"] > 0:
             profit = (price - row["평단가"]) / row["평단가"] * 100
         else:
             profit = 0
 
         profit_rates.append(round(profit, 2))
 
-        # 매매 신호
         if profit <= -10:
             signal = "🔵 추가매수 고려"
         elif profit >= 20:
@@ -106,9 +105,6 @@ if st.session_state.portfolio:
     st.subheader("📋 실시간 수익 현황 & 매매 판단")
     st.dataframe(df, use_container_width=True)
 
-    # -----------------------------
-    # 수익률 그래프
-    # -----------------------------
     st.markdown("---")
     st.subheader("📈 종목별 수익률")
 
@@ -120,13 +116,10 @@ if st.session_state.portfolio:
 
     st.pyplot(fig)
 
-    # -----------------------------
-    # 전체 판단
-    # -----------------------------
-    avg_return = df["수익률(%)"].mean()
-
     st.markdown("---")
     st.subheader("🧠 포트폴리오 종합 판단")
+
+    avg_return = df["수익률(%)"].mean()
 
     if avg_return >= 15:
         st.success("전체 수익 구간. 일부 분할매도 고려 가능.")
