@@ -2,176 +2,128 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
-import warnings
-warnings.filterwarnings("ignore")
+import plotly.graph_objects as go
 
 st.set_page_config(layout="wide")
-st.title("📊 AI 포트폴리오 매니저 (안정화 리빌드 버전)")
 
-# -------------------------
-# 입력
-# -------------------------
-tickers_input = st.text_input("종목코드 (.KS 포함)", 
-"005930.KS, NFLX, 360750.KS, QQQ, SCHD, 458730.KS, VT, NVDA, TSLA")
+st.title("📊 AI 포트폴리오 매니저 Pro")
 
-avg_input = st.text_input("평단가", 
-"64260, 58385, 21380, 774567, 36992, 12360, 186885, 189419, 386170")
+# ----------------------
+# 입력 영역
+# ----------------------
 
-qty_input = st.text_input("보유 수량", 
-"64, 4, 445, 9, 156, 152, 8, 5, 2")
+with st.expander("📌 포트폴리오 입력", expanded=True):
+    tickers = st.text_input("종목코드", "AAPL, MSFT, NVDA")
+    buy_prices = st.text_input("평단가", "150, 300, 400")
+    quantities = st.text_input("수량", "10, 5, 3")
 
-tickers = [t.strip() for t in tickers_input.split(",")]
-avg_prices = [float(x.strip()) for x in avg_input.split(",")]
-quantities = [float(x.strip()) for x in qty_input.split(",")]
+tickers = [t.strip() for t in tickers.split(",")]
+buy_prices = list(map(float, buy_prices.split(",")))
+quantities = list(map(int, quantities.split(",")))
 
-portfolio_rows = []
-error_list = []
+# ----------------------
+# 함수 정의
+# ----------------------
 
-# -------------------------
-# 종목별 처리
-# -------------------------
-for i, ticker in enumerate(tickers):
+def calculate_rsi(data, window=14):
+    delta = data.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window).mean()
+    avg_loss = loss.rolling(window).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
-    df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True)
+results = []
+total_value = 0
+total_score = 0
 
-    if df.empty or len(df) < 40:
-        error_list.append(ticker)
+for ticker, buy_price, qty in zip(tickers, buy_prices, quantities):
+
+    df = yf.download(ticker, period="6mo", progress=False)
+    if df.empty:
         continue
 
-    close = df["Close"].dropna()
-    current_price = float(close.iloc[-1])
+    current_price = df['Close'].iloc[-1]
+    ma5 = df['Close'].rolling(5).mean().iloc[-1]
+    ma20 = df['Close'].rolling(20).mean().iloc[-1]
+    ma60 = df['Close'].rolling(60).mean().iloc[-1]
 
-    avg_price = avg_prices[i]
-    qty = quantities[i]
+    rsi = calculate_rsi(df['Close']).iloc[-1]
+    return_30 = (df['Close'].iloc[-1] / df['Close'].iloc[-30] - 1) * 100
+    volatility = df['Close'].pct_change().std()
+
+    # MDD
+    rolling_max = df['Close'].cummax()
+    drawdown = (df['Close'] - rolling_max) / rolling_max
+    mdd = drawdown.min()
+
+    # 점수 계산
+    trend_strength = (ma5 - ma60) / ma60
+    trend_score = min(max(trend_strength * 200, 0), 25)
+
+    momentum_score = min(max(return_30 * 1.5, 0), 20)
+
+    rsi_score = 15 - abs(rsi - 50) * 0.3
+    rsi_score = max(min(rsi_score, 15), 0)
+
+    vol_score = max(20 - volatility * 400, 0)
+
+    mdd_score = max(20 + (mdd * 200), 0)
+
+    ai_score = trend_score + momentum_score + rsi_score + vol_score + mdd_score
+    ai_score = min(max(ai_score, 0), 100)
 
     value = current_price * qty
-    profit = (current_price - avg_price) * qty
-    return_pct = (current_price - avg_price) / avg_price * 100
+    total_value += value
+    total_score += ai_score
 
-    # 기술지표
-    ma5 = close.rolling(5).mean()
-    ma20 = close.rolling(20).mean()
-    trend30 = (close.iloc[-1] - close.iloc[-30]) / close.iloc[-30] * 100
-    volatility = close.pct_change().std() * 100
+    results.append({
+        "종목": ticker,
+        "현재가": round(current_price, 2),
+        "AI 점수": round(ai_score, 1),
+        "30일 수익률(%)": round(return_30, 2),
+        "보유가치": round(value, 2)
+    })
 
-    score = 50
-    signal = "관망"
+df_result = pd.DataFrame(results)
 
-    if ma5.iloc[-1] > ma20.iloc[-1]:
-        score += 20
-        signal = "📈 매수 우위"
-    else:
-        score -= 10
+# ----------------------
+# KPI 카드
+# ----------------------
 
-    if trend30 > 5:
-        score += 15
-    elif trend30 < -5:
-        score -= 15
+col1, col2, col3 = st.columns(3)
 
-    if volatility < 2:
-        score += 10
+col1.metric("총 자산 가치", f"${round(total_value,2)}")
+col2.metric("평균 AI 점수", f"{round(total_score/len(df_result),1) if len(df_result)>0 else 0}")
+col3.metric("보유 종목 수", len(df_result))
 
-    # -------------------------
-    # LSTM (상위 2개 종목만 실행)
-    # -------------------------
-    pred_price = None
+st.dataframe(df_result, use_container_width=True)
 
-    if i < 2:  # 과부하 방지
-        try:
-            scaler = MinMaxScaler()
-            scaled = scaler.fit_transform(close.values.reshape(-1,1))
-
-            X, y = [], []
-            lookback = 20
-
-            for j in range(lookback, len(scaled)):
-                X.append(scaled[j-lookback:j])
-                y.append(scaled[j])
-
-            X, y = np.array(X), np.array(y)
-
-            model = Sequential()
-            model.add(LSTM(32, input_shape=(X.shape[1],1)))
-            model.add(Dense(1))
-            model.compile(loss="mse", optimizer="adam")
-            model.fit(X, y, epochs=3, batch_size=16, verbose=0)
-
-            last_seq = scaled[-lookback:]
-            last_seq = np.reshape(last_seq,(1,lookback,1))
-            pred_scaled = model.predict(last_seq, verbose=0)
-            pred_price = scaler.inverse_transform(pred_scaled)[0][0]
-
-        except:
-            pred_price = None
-
-    # fallback 선형회귀
-    if pred_price is None:
-        X_lr = np.arange(len(close)).reshape(-1,1)
-        y_lr = close.values
-        lr = LinearRegression().fit(X_lr,y_lr)
-        pred_price = lr.predict([[len(close)+5]])[0]
-
-    portfolio_rows.append([
-        ticker, avg_price, current_price, qty,
-        value, profit, return_pct,
-        signal, trend30, score, pred_price
-    ])
-
-# -------------------------
-# 오류 종목 표시
-# -------------------------
-if error_list:
-    st.warning(f"⚠ 데이터 부족 또는 오류 종목: {', '.join(error_list)}")
-
-if not portfolio_rows:
-    st.error("모든 종목 데이터 로딩 실패")
-    st.stop()
-
-cols = [
-    "Ticker","평단가","현재가","보유수량",
-    "총평가금액","평가손익","수익률(%)",
-    "매매신호","30일추세(%)","AI점수","예측가"
-]
-
-portfolio = pd.DataFrame(portfolio_rows, columns=cols)
-
-total_asset = portfolio["총평가금액"].sum()
-portfolio["비중(%)"] = portfolio["총평가금액"]/total_asset*100
-
-# -------------------------
-# 자산 현황
-# -------------------------
-st.header("💰 현재 자산")
-
-col1,col2,col3 = st.columns(3)
-col1.metric("총 자산", f"{total_asset:,.0f}")
-col2.metric("총 손익", f"{portfolio['평가손익'].sum():,.0f}")
-col3.metric("평균 수익률", f"{portfolio['수익률(%)'].mean():.2f}%")
-
-st.dataframe(portfolio.round(2), use_container_width=True)
-
-# -------------------------
+# ----------------------
 # 리밸런싱
-# -------------------------
-st.header("🔁 자동 리밸런싱")
+# ----------------------
 
-score_sum = portfolio["AI점수"].sum()
-portfolio["목표비중(%)"] = portfolio["AI점수"]/score_sum*100
-portfolio["목표금액"] = total_asset * portfolio["목표비중(%)"]/100
-portfolio["조정수량"] = (portfolio["목표금액"] - portfolio["총평가금액"]) / portfolio["현재가"]
+if total_score > 0:
+    st.subheader("🔄 자동 리밸런싱 추천")
 
-st.dataframe(portfolio[["Ticker","비중(%)","목표비중(%)","조정수량"]].round(2),
-use_container_width=True)
+    df_result["목표 비중"] = df_result["AI 점수"] / total_score
+    df_result["목표 금액"] = df_result["목표 비중"] * total_value
+    df_result["조정 필요 금액"] = df_result["목표 금액"] - df_result["보유가치"]
 
-# -------------------------
-# 종합 판단
-# -------------------------
-best = portfolio.sort_values("AI점수",ascending=False).iloc[0]
-worst = portfolio.sort_values("AI점수").iloc[0]
+    st.dataframe(df_result, use_container_width=True)
 
-st.success(f"📌 매수 우선: {best['Ticker']} (점수 {best['AI점수']})")
-st.warning(f"⚠ 비중 축소 고려: {worst['Ticker']} (점수 {worst['AI점수']})")
+# ----------------------
+# 차트
+# ----------------------
+
+if len(tickers) > 0:
+    chart_ticker = tickers[0]
+    df_chart = yf.download(chart_ticker, period="6mo", progress=False)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['Close'], name="Close"))
+    fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['Close'].rolling(20).mean(), name="MA20"))
+    fig.update_layout(height=350)
+
+    st.plotly_chart(fig, use_container_width=True)
