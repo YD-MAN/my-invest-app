@@ -1,129 +1,133 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import yfinance as yf
-import plotly.graph_objects as go
 
-st.set_page_config(layout="wide")
+st.set_page_config(
+    page_title="AI 포트폴리오 매니저 Pro",
+    layout="wide"
+)
+
+# ---------------------------
+# 🎨 프리미엄 다크 스타일
+# ---------------------------
+st.markdown("""
+<style>
+body { background-color: #0F1115; color: #F2F2F2; }
+.card {
+    background-color: #181C22;
+    padding: 20px;
+    border-radius: 16px;
+    margin-bottom: 15px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.up { color: #E10600; font-weight: bold; font-size:22px; }
+.down { color: #1F4E9E; font-weight: bold; font-size:22px; }
+.flat { color: #8A8F98; font-weight: bold; font-size:22px; }
+.score { font-size:18px; font-weight:600; color:#FFD700; }
+.risk-low { color:#4CAF50; font-weight:600;}
+.risk-mid { color:#FFA500; font-weight:600;}
+.risk-high { color:#FF5252; font-weight:600;}
+</style>
+""", unsafe_allow_html=True)
 
 st.title("📊 AI 포트폴리오 매니저 Pro")
 
-# ----------------------
-# 입력 영역
-# ----------------------
+# ---------------------------
+# 📥 입력 영역
+# ---------------------------
+tickers_input = st.text_input("종목코드 (쉼표로 구분)", "AAPL, MSFT, NVDA")
+buy_prices_input = st.text_input("평단가", "150, 300, 400")
+quantities_input = st.text_input("수량", "10, 5, 3")
 
-with st.expander("📌 포트폴리오 입력", expanded=True):
-    tickers = st.text_input("종목코드", "AAPL, MSFT, NVDA")
-    buy_prices = st.text_input("평단가", "150, 300, 400")
-    quantities = st.text_input("수량", "10, 5, 3")
+tickers = [t.strip().upper() for t in tickers_input.split(",")]
+buy_prices = [float(x.strip()) for x in buy_prices_input.split(",")]
+quantities = [float(x.strip()) for x in quantities_input.split(",")]
 
-tickers = [t.strip() for t in tickers.split(",")]
-buy_prices = list(map(float, buy_prices.split(",")))
-quantities = list(map(int, quantities.split(",")))
+# 길이 체크
+if not (len(tickers) == len(buy_prices) == len(quantities)):
+    st.error("입력 데이터 길이가 맞지 않습니다.")
+    st.stop()
 
-# ----------------------
-# 함수 정의
-# ----------------------
+# ---------------------------
+# 📊 리스크 계산 함수
+# ---------------------------
+def calculate_risk(volatility):
+    if volatility < 0.02:
+        return "낮음", "risk-low"
+    elif volatility < 0.05:
+        return "보통", "risk-mid"
+    else:
+        return "높음", "risk-high"
 
-def calculate_rsi(data, window=14):
-    delta = data.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window).mean()
-    avg_loss = loss.rolling(window).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+# ---------------------------
+# 📈 AI 점수 계산
+# ---------------------------
+def calculate_ai_score(trend_strength, volatility, momentum):
+    trend_score = np.clip(trend_strength * 200, 0, 25)
+    vol_score = np.clip((1 - volatility) * 30, 0, 30)
+    momentum_score = np.clip(momentum * 100, 0, 25)
+    diversification_score = 20
+    total = trend_score + vol_score + momentum_score + diversification_score
+    return round(np.clip(total, 0, 100))
 
-results = []
-total_value = 0
-total_score = 0
+# ---------------------------
+# 🔍 데이터 처리
+# ---------------------------
+for i, ticker in enumerate(tickers):
 
-for ticker, buy_price, qty in zip(tickers, buy_prices, quantities):
+    data = yf.download(ticker, period="3mo", progress=False)
 
-    df = yf.download(ticker, period="6mo", progress=False)
-    if df.empty:
+    if data.empty:
+        st.warning(f"{ticker} 데이터 불러오기 실패")
         continue
 
-    current_price = df['Close'].iloc[-1]
-    ma5 = df['Close'].rolling(5).mean().iloc[-1]
-    ma20 = df['Close'].rolling(20).mean().iloc[-1]
-    ma60 = df['Close'].rolling(60).mean().iloc[-1]
+    close = data["Close"].dropna()
 
-    rsi = calculate_rsi(df['Close']).iloc[-1]
-    return_30 = (df['Close'].iloc[-1] / df['Close'].iloc[-30] - 1) * 100
-    volatility = df['Close'].pct_change().std()
+    if close.empty:
+        continue
 
-    # MDD
-    rolling_max = df['Close'].cummax()
-    drawdown = (df['Close'] - rolling_max) / rolling_max
-    mdd = drawdown.min()
+    current_price = float(close.iloc[-1])
+    buy_price = buy_prices[i]
+    quantity = quantities[i]
 
-    # 점수 계산
-    trend_strength = (ma5 - ma60) / ma60
-    trend_score = min(max(trend_strength * 200, 0), 25)
+    change_pct = ((current_price - buy_price) / buy_price) * 100
 
-    momentum_score = min(max(return_30 * 1.5, 0), 20)
+    # 상승/하락 표시
+    if change_pct > 0:
+        change_html = f"<span class='up'>▲ +{change_pct:.2f}%</span>"
+    elif change_pct < 0:
+        change_html = f"<span class='down'>▼ {change_pct:.2f}%</span>"
+    else:
+        change_html = f"<span class='flat'>0.00%</span>"
 
-    rsi_score = 15 - abs(rsi - 50) * 0.3
-    rsi_score = max(min(rsi_score, 15), 0)
+    # 변동성
+    returns = close.pct_change().dropna()
+    volatility = float(returns.std()) if not returns.empty else 0
 
-    vol_score = max(20 - volatility * 400, 0)
+    # 추세 강도
+    ma_short = close.rolling(20).mean().iloc[-1]
+    ma_long = close.rolling(60).mean().iloc[-1] if len(close) >= 60 else ma_short
+    trend_strength = (ma_short - ma_long) / ma_long if ma_long != 0 else 0
 
-    mdd_score = max(20 + (mdd * 200), 0)
+    # 모멘텀
+    momentum = (close.iloc[-1] - close.iloc[0]) / close.iloc[0]
 
-    ai_score = trend_score + momentum_score + rsi_score + vol_score + mdd_score
-    ai_score = min(max(ai_score, 0), 100)
+    ai_score = calculate_ai_score(trend_strength, volatility, momentum)
 
-    value = current_price * qty
-    total_value += value
-    total_score += ai_score
+    risk_label, risk_class = calculate_risk(volatility)
 
-    results.append({
-        "종목": ticker,
-        "현재가": round(current_price, 2),
-        "AI 점수": round(ai_score, 1),
-        "30일 수익률(%)": round(return_30, 2),
-        "보유가치": round(value, 2)
-    })
-
-df_result = pd.DataFrame(results)
-
-# ----------------------
-# KPI 카드
-# ----------------------
-
-col1, col2, col3 = st.columns(3)
-
-col1.metric("총 자산 가치", f"${round(total_value,2)}")
-col2.metric("평균 AI 점수", f"{round(total_score/len(df_result),1) if len(df_result)>0 else 0}")
-col3.metric("보유 종목 수", len(df_result))
-
-st.dataframe(df_result, use_container_width=True)
-
-# ----------------------
-# 리밸런싱
-# ----------------------
-
-if total_score > 0:
-    st.subheader("🔄 자동 리밸런싱 추천")
-
-    df_result["목표 비중"] = df_result["AI 점수"] / total_score
-    df_result["목표 금액"] = df_result["목표 비중"] * total_value
-    df_result["조정 필요 금액"] = df_result["목표 금액"] - df_result["보유가치"]
-
-    st.dataframe(df_result, use_container_width=True)
-
-# ----------------------
-# 차트
-# ----------------------
-
-if len(tickers) > 0:
-    chart_ticker = tickers[0]
-    df_chart = yf.download(chart_ticker, period="6mo", progress=False)
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['Close'], name="Close"))
-    fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['Close'].rolling(20).mean(), name="MA20"))
-    fig.update_layout(height=350)
-
-    st.plotly_chart(fig, use_container_width=True)
+    # ---------------------------
+    # 📱 모바일 카드 UI
+    # ---------------------------
+    st.markdown(f"""
+    <div class="card">
+        <h3>{ticker}</h3>
+        <div style="font-size:16px; color:#A0A7B5;">
+            현재가: ${current_price:.2f}
+        </div>
+        <div>{change_html}</div>
+        <div class="score">AI 점수: {ai_score}점</div>
+        <div class="{risk_class}">리스크: {risk_label}</div>
+    </div>
+    """, unsafe_allow_html=True)
