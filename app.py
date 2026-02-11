@@ -13,14 +13,20 @@ tickers_input = st.text_input("종목코드 (쉼표 구분)", "AAPL, MSFT, NVDA"
 buy_prices_input = st.text_input("평단가", "150, 300, 400")
 quantities_input = st.text_input("수량", "10, 5, 3")
 
-def safe_float_list(s: str):
-    out = []
+
+def safe_float_list(s: str) -> list[float]:
+    out: list[float] = []
     for item in s.split(","):
+        item = item.strip()
+        if not item:
+            out.append(0.0)
+            continue
         try:
-            out.append(float(item.strip()))
+            out.append(float(item))
         except Exception:
             out.append(0.0)
     return out
+
 
 tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 buy_prices = safe_float_list(buy_prices_input)
@@ -38,17 +44,20 @@ while len(quantities) < max_len:
 # ---------------------------
 # 리스크/점수
 # ---------------------------
+
+
 def calculate_risk(vol: float) -> str:
     if vol < 0.02:
         return "낮음"
-    elif vol < 0.05:
+    if vol < 0.05:
         return "보통"
-    else:
-        return "높음"
+    return "높음"
+
 
 def calculate_ai_score(trend: float, vol: float, mom: float) -> int:
     score = (trend * 200.0) + ((1.0 - vol) * 30.0) + (mom * 100.0) + 20.0
     return int(np.clip(score, 0, 100))
+
 
 # ---------------------------
 # 처리
@@ -63,7 +72,7 @@ for i in range(max_len):
             ticker,
             period="3mo",
             progress=False,
-            auto_adjust=False
+            auto_adjust=False,
         )
     except Exception as e:
         st.warning(f"{ticker} 다운로드 실패: {e}")
@@ -99,11 +108,17 @@ for i in range(max_len):
 
     # 변동성
     returns = close.pct_change().dropna()
-    volatility = float(returns.std()) if len(returns) > 0 else 0.0
+    if len(returns) > 0:
+        volatility = float(returns.std())
+    else:
+        volatility = 0.0
 
     # 추세 (ma20, ma60) + NaN/0 방어
     ma20 = close.rolling(20).mean().iloc[-1]
-    ma60 = close.rolling(60).mean().iloc[-1] if len(close) >= 60 else ma20
+    if len(close) >= 60:
+        ma60 = close.rolling(60).mean().iloc[-1]
+    else:
+        ma60 = ma20
 
     if pd.isna(ma20) or pd.isna(ma60) or float(ma60) == 0.0:
         trend = 0.0
@@ -132,7 +147,10 @@ for i in range(max_len):
         arrow = ""
 
     # 평가손익
-    pnl = (current_price - buy_price) * qty if buy_price != 0.0 else 0.0
+    if buy_price != 0.0:
+        pnl = (current_price - buy_price) * qty
+    else:
+        pnl = 0.0
 
     st.markdown(
         f"""
@@ -149,5 +167,5 @@ for i in range(max_len):
 AI 점수: {ai_score}점  
 리스크: {risk}
 """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
