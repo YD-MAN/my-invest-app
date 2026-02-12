@@ -8,3 +8,4 @@ requests
 transformers
 torch
 sentencepiece
+streamlit-js-eval
