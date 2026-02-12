@@ -1,10 +1,15 @@
 # app.py
 # =========================================================
-# AI 포트폴리오 매니저 Pro (완성본)
-# - 원화 평단가 입력 + 국내/해외 통화표시 + 원화 손익
-# - RandomForest 상승확률 + 뉴스 감성(ETF/지수 키워드 대체 + NewsAPI 보강)
-# - 한국어 감성(Transformer) 자동 적용(가능할 때)
+# AI 포트폴리오 매니저 Pro (최종 완성본)
+# - 원화 평단가 입력
+# - 국내(.KS/.KQ) & BTC-KRW: 원화 현재가
+# - 해외: USD 현재가 + 원화 환산(USD/KRW) 표시, 손익/평가 모두 원화 기준
+# - RandomForest: 다음 거래일 상승확률
+# - 뉴스 감성: yfinance → (ETF/지수/뉴스부실) NewsAPI 키워드 자동 대체
+#   - 뉴스 없으면 UI에서 깔끔하게 숨김
+#   - 한국어 감성(Transformer) 가능할 때 자동 적용
 # - 입력 자동 URL 저장 + Reset + 설정 JSON 저장/불러오기
+# - 포트폴리오 전체 합산(총 평가금액/손익/비중 차트)
 # =========================================================
 
 import json
@@ -20,6 +25,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
+# 차트(가벼운 기본 내장)
+import matplotlib.pyplot as plt
+
 # ---------------------------
 # Streamlit 기본
 # ---------------------------
@@ -27,7 +35,7 @@ st.set_page_config(page_title="AI 포트폴리오 매니저 Pro", layout="wide")
 st.title("📊 AI 포트폴리오 매니저 Pro")
 
 # =========================================================
-# 0) 자동 URL 저장 입력부 (전략 B 자동 저장 + Reset + 안전 로드)
+# 0) 자동 URL 저장 입력부
 # =========================================================
 
 DEFAULT_TICKERS = "AAPL, MSFT, NVDA, 005930.KS, BTC-KRW"
@@ -78,12 +86,10 @@ def request_reset():
 
 
 def request_apply_loaded_settings(payload: dict):
-    # 콜백/업로드 타이밍에서 바로 rerun하지 말고 플래그로 처리
     st.session_state["__loaded_settings__"] = payload
     st.session_state["__apply_loaded_settings__"] = True
 
 
-# 초기 플래그들
 if "__qp_dirty__" not in st.session_state:
     st.session_state["__qp_dirty__"] = False
 if "__reset_requested__" not in st.session_state:
@@ -93,7 +99,6 @@ if "__apply_loaded_settings__" not in st.session_state:
 if "__loaded_settings__" not in st.session_state:
     st.session_state["__loaded_settings__"] = {}
 
-# 초기값: URL → session_state (최초 1회)
 qp = get_qp()
 init_tickers = qp_get_str(qp, "tickers", DEFAULT_TICKERS)
 init_buy = qp_get_str(qp, "buy", DEFAULT_BUYPRICES)
@@ -106,7 +111,7 @@ if "buy_prices_input" not in st.session_state:
 if "quantities_input" not in st.session_state:
     st.session_state["quantities_input"] = init_qty
 
-# ✅ Reset 처리: 콜백 밖에서 실행
+# Reset: 콜백 밖에서 처리
 if st.session_state["__reset_requested__"]:
     for k in ["tickers_input", "buy_prices_input", "quantities_input"]:
         if k in st.session_state:
@@ -117,12 +122,11 @@ if st.session_state["__reset_requested__"]:
         buy=enc(DEFAULT_BUYPRICES),
         qty=enc(DEFAULT_QTYS),
     )
-
     st.session_state["__qp_dirty__"] = False
     st.session_state["__reset_requested__"] = False
     st.rerun()
 
-# ✅ JSON 업로드로 불러오기 적용: 콜백 밖에서 실행
+# JSON 업로드 적용: 콜백 밖에서 처리
 if st.session_state["__apply_loaded_settings__"]:
     loaded = st.session_state.get("__loaded_settings__", {}) or {}
     t = str(loaded.get("tickers_input", DEFAULT_TICKERS))
@@ -139,9 +143,6 @@ if st.session_state["__apply_loaded_settings__"]:
     st.session_state["__loaded_settings__"] = {}
     st.rerun()
 
-# ---------------------------
-# 입력 UI
-# ---------------------------
 st.subheader("입력 (자동 URL 저장)")
 col1, col2, col3, col4 = st.columns([3, 3, 3, 1])
 
@@ -159,7 +160,7 @@ with col4:
     st.write("")
     st.button("Reset", on_click=request_reset)
 
-# ✅ 자동 URL 저장 (dirty일 때만, 다를 때만 set_qp)
+# 자동 URL 저장
 if st.session_state["__qp_dirty__"]:
     desired_t = enc(st.session_state["tickers_input"])
     desired_b = enc(st.session_state["buy_prices_input"])
@@ -185,7 +186,7 @@ if st.session_state["__qp_dirty__"]:
 st.caption("✅ 입력 변경 시 자동으로 URL에 저장됩니다. 새로고침/재접속/공유해도 동일 입력 유지")
 
 # =========================================================
-# 1) 입력값 파싱
+# 1) 파싱
 # =========================================================
 
 tickers_input = st.session_state["tickers_input"]
@@ -208,7 +209,7 @@ def safe_float_list(s: str) -> list[float]:
 
 
 tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
-buy_prices_krw = safe_float_list(buy_prices_input)  # ✅ 전부 원화로 해석
+buy_prices_krw = safe_float_list(buy_prices_input)
 quantities = safe_float_list(quantities_input)
 
 max_len = max(len(tickers), len(buy_prices_krw), len(quantities))
@@ -220,7 +221,7 @@ while len(quantities) < max_len:
     quantities.append(0.0)
 
 # =========================================================
-# 2) 유틸: Close 추출/통화 판별/표시
+# 2) 유틸 (Close 추출/통화 판별/표시)
 # =========================================================
 
 
@@ -277,27 +278,81 @@ def fmt_usd(x: float) -> str:
     return f"${x:,.2f}"
 
 
+# =========================================================
+# 3) 환율(USD/KRW) 안정화 + 수동 오버라이드
+# =========================================================
+
 @st.cache_data(ttl=60 * 30)
-def get_usdkrw_rate() -> float:
+def try_fetch_usdkrw() -> tuple[float, str]:
+    """
+    여러 방식으로 USD/KRW 시도:
+    1) yf.download('KRW=X')
+    2) yf.Ticker('KRW=X').history
+    3) yf.download('USDKRW=X') (일부 환경에서 이 심볼이 먹는 경우가 있음)
+    """
+    # 1) KRW=X download
     try:
-        fx = yf.download("KRW=X", period="10d", progress=False)
-        fx_close = extract_close_series(fx)
-        if fx_close is None:
-            return 0.0
-        rate = float(fx_close.iloc[-1])
-        return rate if rate > 0 else 0.0
+        fx = yf.download("KRW=X", period="1mo", progress=False)
+        c = extract_close_series(fx)
+        if c is not None and len(c) > 0:
+            v = float(c.iloc[-1])
+            if v > 0:
+                return v, "KRW=X(download)"
     except Exception:
-        return 0.0
+        pass
+
+    # 2) KRW=X history
+    try:
+        fx = yf.Ticker("KRW=X").history(period="1mo")
+        c = extract_close_series(fx)
+        if c is not None and len(c) > 0:
+            v = float(c.iloc[-1])
+            if v > 0:
+                return v, "KRW=X(history)"
+    except Exception:
+        pass
+
+    # 3) USDKRW=X download
+    try:
+        fx = yf.download("USDKRW=X", period="1mo", progress=False)
+        c = extract_close_series(fx)
+        if c is not None and len(c) > 0:
+            v = float(c.iloc[-1])
+            if v > 0:
+                return v, "USDKRW=X(download)"
+    except Exception:
+        pass
+
+    return 0.0, "fail"
 
 
-usdkrw = get_usdkrw_rate()
+usdkrw_auto, usdkrw_src = try_fetch_usdkrw()
+
+with st.sidebar:
+    st.header("💱 환율 설정")
+    manual_fx = st.number_input(
+        "USD/KRW 수동 입력(0이면 자동)",
+        min_value=0.0,
+        value=0.0,
+        step=1.0,
+        help="자동 환율이 실패하거나 0으로 나오면 여기에 직접 입력하세요.",
+    )
+
+if manual_fx > 0:
+    usdkrw = float(manual_fx)
+    usdkrw_src_final = "manual"
+else:
+    usdkrw = float(usdkrw_auto)
+    usdkrw_src_final = usdkrw_src
+
 if usdkrw == 0.0:
-    st.warning("USD/KRW 환율을 가져오지 못했습니다. 해외 종목 환산 KRW가 0으로 표시될 수 있어요.")
+    st.warning("USD/KRW 환율을 가져오지 못했습니다. (야후 응답/레이트리밋/일시적 빈 데이터 등) 해외 종목 환산 KRW가 0으로 표시될 수 있어요. 👉 사이드바에서 수동 환율을 넣으면 해결됩니다.")
+else:
+    st.info(f"USD/KRW 환율: {usdkrw:,.2f}  (source: {usdkrw_src_final})")
 
 # =========================================================
-# 3) 기술지표 + 점수
+# 4) 기술지표 + 점수
 # =========================================================
-
 
 def calculate_risk(vol: float) -> str:
     if vol < 0.02:
@@ -313,10 +368,8 @@ def base_ai_score(trend: float, vol: float, mom: float) -> float:
 
 
 def upgraded_ai_score(trend: float, vol: float, mom: float, prob_up: float, senti: float) -> int:
-    # RF 확률: 0.5 기준 최대 ±25점 정도
-    rf_component = (prob_up - 0.5) * 50.0
-    # 뉴스 감성: 최대 ±10점 정도
-    news_component = senti * 10.0
+    rf_component = (prob_up - 0.5) * 50.0     # 최대 ±25점
+    news_component = senti * 10.0             # 최대 ±10점
     s = base_ai_score(trend, vol, mom) + rf_component + news_component
     return int(np.clip(s, 0, 100))
 
@@ -331,9 +384,8 @@ def rsi(series: pd.Series, window: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 # =========================================================
-# 4) RandomForest 상승확률
+# 5) RandomForest 상승확률
 # =========================================================
-
 
 @st.cache_data(ttl=60 * 60)
 def rf_up_probability(ticker: str) -> tuple[float, dict]:
@@ -397,21 +449,18 @@ def rf_up_probability(ticker: str) -> tuple[float, dict]:
     return prob_up, debug
 
 # =========================================================
-# 5) 뉴스 강화: ETF/지수 키워드 대체 + NewsAPI + 한국어 감성(고성능)
+# 6) 뉴스 감성: ETF/지수 키워드 대체 + NewsAPI + 한국어 고성능
 # =========================================================
 
 analyzer = SentimentIntensityAnalyzer()
 
-# 사이드바 옵션 (무거운 기능은 사용자가 끌 수 있게)
 with st.sidebar:
-    st.header("⚙️ 뉴스/감성 옵션")
+    st.header("📰 뉴스/감성 옵션")
     ENABLE_NEWSAPI = st.toggle("NewsAPI 보강 사용", value=True)
     ENABLE_KO_TRANSFORMER = st.toggle("한국어 감성(Transformer) 사용", value=True)
-    st.caption("한국어 감성은 무거울 수 있어요. 느리면 꺼도 됩니다.")
+    st.caption("한국어 감성은 무거울 수 있어요. 느리면 끄세요.")
 
-# 한국어 감성 모델(멀티링구얼, “가능할 때” 자동 사용)
 KOREAN_SENTIMENT_MODEL = "nlptown/bert-base-multilingual-uncased-sentiment"
-
 
 def get_newsapi_key() -> str:
     try:
@@ -419,9 +468,7 @@ def get_newsapi_key() -> str:
     except Exception:
         return ""
 
-
 NEWSAPI_KEY = get_newsapi_key()
-
 
 @st.cache_data(ttl=60 * 60)
 def guess_quote_type(ticker: str) -> str:
@@ -432,17 +479,14 @@ def guess_quote_type(ticker: str) -> str:
     except Exception:
         return "UNKNOWN"
 
-
 def is_index_ticker(ticker: str) -> bool:
     return ticker.startswith("^")
-
 
 def is_etf_or_index(ticker: str) -> bool:
     if is_index_ticker(ticker):
         return True
     qt = guess_quote_type(ticker)
     return qt in {"ETF", "INDEX", "MUTUALFUND"}
-
 
 @st.cache_data(ttl=60 * 30)
 def get_keyword_for_news(ticker: str) -> str:
@@ -454,16 +498,12 @@ def get_keyword_for_news(ticker: str) -> str:
             return name
     except Exception:
         pass
-
-    if ticker.startswith("^"):
-        return ticker[1:]
-    return ticker
-
+    return ticker[1:] if ticker.startswith("^") else ticker
 
 @st.cache_data(ttl=60 * 20)
-def newsapi_everything(query: str, language: str | None = None, page_size: int = 20) -> tuple[list[str], dict]:
+def newsapi_everything(query: str, language: str | None, page_size: int) -> tuple[list[str], dict]:
     if not (ENABLE_NEWSAPI and NEWSAPI_KEY):
-        if not NEWSAPI_KEY and ENABLE_NEWSAPI:
+        if ENABLE_NEWSAPI and not NEWSAPI_KEY:
             return [], {"status": "no_newsapi_key"}
         return [], {"status": "newsapi_disabled"}
 
@@ -495,27 +535,21 @@ def newsapi_everything(query: str, language: str | None = None, page_size: int =
     except Exception as e:
         return [], {"status": "newsapi_fail", "error": str(e)}
 
-
 def detect_language_simple(text: str) -> str:
-    if re.search(r"[가-힣]", text):
-        return "ko"
-    return "en"
-
+    return "ko" if re.search(r"[가-힣]", text) else "en"
 
 @st.cache_resource
 def get_ko_sentiment_pipe():
-    # transformers/torch가 설치되지 않았으면 예외 → 호출부에서 처리
+    # transformers/torch가 없거나 환경이 부족하면 예외 → 호출부에서 안전 처리
     from transformers import pipeline
     return pipeline("sentiment-analysis", model=KOREAN_SENTIMENT_MODEL)
-
 
 def stars_to_compound(label: str) -> float:
     m = re.search(r"(\d)", label)
     if not m:
         return 0.0
-    stars = int(m.group(1))  # 1~5
-    return (stars - 3) / 2.0  # 1->-1, 3->0, 5->+1
-
+    stars = int(m.group(1))
+    return (stars - 3) / 2.0  # -1 ~ +1
 
 def sentiment_compound_from_titles(titles: list[str]) -> tuple[float, str]:
     if not titles:
@@ -526,26 +560,18 @@ def sentiment_compound_from_titles(titles: list[str]) -> tuple[float, str]:
     lang = detect_language_simple(joined)
 
     if lang == "en":
-        scores = []
-        for t in titles:
-            s = analyzer.polarity_scores(t).get("compound", 0.0)
-            scores.append(float(s))
-        comp = float(np.mean(scores)) if scores else 0.0
+        vals = [float(analyzer.polarity_scores(t).get("compound", 0.0)) for t in titles]
+        comp = float(np.mean(vals)) if vals else 0.0
     else:
-        # 한국어/비영어: Transformer(가능할 때)
         if not ENABLE_KO_TRANSFORMER:
             comp = 0.0
         else:
             try:
                 pipe = get_ko_sentiment_pipe()
                 preds = pipe(titles)
-                vals = []
-                for p in preds:
-                    label = str(p.get("label", ""))
-                    vals.append(stars_to_compound(label))
+                vals = [stars_to_compound(str(p.get("label", ""))) for p in preds]
                 comp = float(np.mean(vals)) if vals else 0.0
             except Exception:
-                # torch/transformers 미설치 또는 리소스 부족이면 안전하게 중립 처리
                 comp = 0.0
 
     if comp > 0.05:
@@ -554,87 +580,78 @@ def sentiment_compound_from_titles(titles: list[str]) -> tuple[float, str]:
         lab = "부정"
     else:
         lab = "중립"
-
     return comp, lab
-
 
 @st.cache_data(ttl=60 * 20)
 def news_sentiment_score(ticker: str, max_items: int = 12) -> tuple[float, list[str], dict]:
-    """
-    return: (sentiment_score(-1~+1), titles, debug)
-    - yfinance 뉴스 → 타이틀 없으면 ETF/지수는 키워드로 NewsAPI 대체
-    - 그래도 없으면 titles=[]로 반환 (UI에서 숨김 처리)
-    """
-    # 1) yfinance 티커 뉴스 우선
+    # 1) yfinance 티커 뉴스
     try:
-        t = yf.Ticker(ticker)
-        news = getattr(t, "news", None)
+        news = getattr(yf.Ticker(ticker), "news", None)
     except Exception:
         news = None
 
-    titles: list[str] = []
+    titles = []
     if news:
         for item in news[:max_items]:
             title = (item.get("title") or "").strip()
             if title:
                 titles.append(title)
 
-    # 2) yfinance 타이틀이 없으면(= no_valid_titles) → NewsAPI fallback
+    # 2) no_valid_titles → ETF/지수는 키워드 기반 NewsAPI 대체
     if len(titles) == 0:
+        kw = get_keyword_for_news(ticker)
+
         if is_etf_or_index(ticker):
-            kw = get_keyword_for_news(ticker)
+            t_en, dbg_en = newsapi_everything(kw, "en", max_items)
+            if t_en:
+                comp, lab = sentiment_compound_from_titles(t_en)
+                return comp, t_en, {"status": "fallback_newsapi_etf_index", "keyword": kw, "lang": "en", "label": lab, **dbg_en}
 
-            titles_en, dbg_en = newsapi_everything(kw, language="en", page_size=max_items)
-            if titles_en:
-                comp, lab = sentiment_compound_from_titles(titles_en)
-                return comp, titles_en, {"status": "fallback_newsapi_etf_index", "keyword": kw, "lang": "en", "label": lab, **dbg_en}
-
-            titles_ko, dbg_ko = newsapi_everything(kw, language="ko", page_size=max_items)
-            if titles_ko:
-                comp, lab = sentiment_compound_from_titles(titles_ko)
-                return comp, titles_ko, {"status": "fallback_newsapi_etf_index", "keyword": kw, "lang": "ko", "label": lab, **dbg_ko}
+            t_ko, dbg_ko = newsapi_everything(kw, "ko", max_items)
+            if t_ko:
+                comp, lab = sentiment_compound_from_titles(t_ko)
+                return comp, t_ko, {"status": "fallback_newsapi_etf_index", "keyword": kw, "lang": "ko", "label": lab, **dbg_ko}
 
             return 0.0, [], {"status": "no_news_after_fallback", "keyword": kw, "quoteType": guess_quote_type(ticker)}
 
-        # 일반 종목도 NewsAPI로 보강하고 싶으면 True
+        # 일반 종목도 보강(원하면 True)
         USE_NEWSAPI_FOR_STOCKS_TOO = True
         if USE_NEWSAPI_FOR_STOCKS_TOO:
-            kw = get_keyword_for_news(ticker)
+            t_en, dbg_en = newsapi_everything(kw, "en", max_items)
+            if t_en:
+                comp, lab = sentiment_compound_from_titles(t_en)
+                return comp, t_en, {"status": "fallback_newsapi_stock", "keyword": kw, "lang": "en", "label": lab, **dbg_en}
 
-            titles_en, dbg_en = newsapi_everything(kw, language="en", page_size=max_items)
-            if titles_en:
-                comp, lab = sentiment_compound_from_titles(titles_en)
-                return comp, titles_en, {"status": "fallback_newsapi_stock", "keyword": kw, "lang": "en", "label": lab, **dbg_en}
-
-            titles_ko, dbg_ko = newsapi_everything(kw, language="ko", page_size=max_items)
-            if titles_ko:
-                comp, lab = sentiment_compound_from_titles(titles_ko)
-                return comp, titles_ko, {"status": "fallback_newsapi_stock", "keyword": kw, "lang": "ko", "label": lab, **dbg_ko}
+            t_ko, dbg_ko = newsapi_everything(kw, "ko", max_items)
+            if t_ko:
+                comp, lab = sentiment_compound_from_titles(t_ko)
+                return comp, t_ko, {"status": "fallback_newsapi_stock", "keyword": kw, "lang": "ko", "label": lab, **dbg_ko}
 
             return 0.0, [], {"status": "no_news_after_fallback", "keyword": kw, "quoteType": guess_quote_type(ticker)}
 
         return 0.0, [], {"status": "no_valid_titles"}
 
-    # 3) yfinance 타이틀이 있으면 감성분석 수행
     comp, lab = sentiment_compound_from_titles(titles)
     return comp, titles, {"status": "ok", "source": "yfinance", "label": lab, "count": len(titles)}
 
 # =========================================================
-# 6) 분석 결과 출력
+# 7) 결과 출력 + 포트폴리오 합산/차트
 # =========================================================
 
 st.divider()
 st.subheader("분석 결과")
+
+rows = []
 
 for i in range(max_len):
     ticker = tickers[i]
     if ticker == "":
         continue
 
-    buy_price_krw = float(buy_prices_krw[i])  # ✅ 원화 평단가
+    buy_price_krw = float(buy_prices_krw[i])
     qty = float(quantities[i])
 
-    # 가격 데이터 (3개월)
+    # 3개월 가격
     try:
         data = yf.download(ticker, period="3mo", progress=False, auto_adjust=False)
     except Exception as e:
@@ -646,20 +663,14 @@ for i in range(max_len):
         st.warning(f"{ticker} 데이터 부족/종가 없음")
         continue
 
-    # 변동성/추세/모멘텀
     returns = close.pct_change().dropna()
     volatility = float(returns.std()) if len(returns) > 0 else 0.0
 
     ma20_val = close.rolling(20).mean().iloc[-1]
     ma60_val = close.rolling(60).mean().iloc[-1] if len(close) >= 60 else ma20_val
-
     ma20 = float(ma20_val) if pd.notna(ma20_val) else np.nan
     ma60 = float(ma60_val) if pd.notna(ma60_val) else np.nan
-
-    if np.isnan(ma20) or np.isnan(ma60) or ma60 == 0.0:
-        trend = 0.0
-    else:
-        trend = (ma20 - ma60) / ma60
+    trend = 0.0 if (np.isnan(ma20) or np.isnan(ma60) or ma60 == 0.0) else (ma20 - ma60) / ma60
 
     current_native = float(close.iloc[-1])
     first_native = float(close.iloc[0])
@@ -667,7 +678,7 @@ for i in range(max_len):
 
     risk = calculate_risk(volatility)
 
-    # 통화 처리
+    # 통화
     if is_korea_ticker(ticker) or (is_crypto_ticker(ticker) and ticker.endswith("-KRW")):
         current_krw = current_native
         current_usd = None
@@ -678,38 +689,25 @@ for i in range(max_len):
         current_usd = current_native
         current_krw = current_usd * usdkrw if usdkrw > 0 else 0.0
         currency_label = "USD→KRW"
-        fx_line = f"환율(USD/KRW): {usdkrw:,.2f}" if usdkrw > 0 else "환율(USD/KRW): 가져오기 실패"
+        fx_line = f"환율(USD/KRW): {usdkrw:,.2f}  (source: {usdkrw_src_final})" if usdkrw > 0 else "환율(USD/KRW): 없음(수동 입력 필요)"
         price_line = f"현재가: {fmt_usd(current_usd)}  (환산 {fmt_krw(current_krw)})"
 
-    # 손익/수익률 (원화 기준)
-    if buy_price_krw == 0.0:
-        change_pct = 0.0
-    else:
-        change_pct = ((current_krw - buy_price_krw) / buy_price_krw) * 100.0
-
+    # 원화 기준 손익/수익률
+    change_pct = 0.0 if buy_price_krw == 0.0 else ((current_krw - buy_price_krw) / buy_price_krw) * 100.0
     eval_krw = current_krw * qty
     pnl_krw = (current_krw - buy_price_krw) * qty if buy_price_krw != 0.0 else 0.0
 
-    if change_pct > 0:
-        color = "red"
-        arrow = "▲"
-    elif change_pct < 0:
-        color = "blue"
-        arrow = "▼"
-    else:
-        color = "gray"
-        arrow = ""
+    color = "red" if change_pct > 0 else ("blue" if change_pct < 0 else "gray")
+    arrow = "▲" if change_pct > 0 else ("▼" if change_pct < 0 else "")
 
     # RF + 뉴스
     prob_up, rf_debug = rf_up_probability(ticker)
     senti, titles, news_debug = news_sentiment_score(ticker)
-
     ai_score = upgraded_ai_score(trend, volatility, momentum, prob_up, senti)
 
     prob_pct = prob_up * 100.0
     senti_label = "긍정" if senti > 0.05 else ("부정" if senti < -0.05 else "중립")
 
-    # ✅ 뉴스가 없으면 뉴스 라인 자체를 숨김
     news_line = ""
     if titles:
         news_line = f"- 뉴스 감성(제목 기반): **{senti_label} ({senti:+.2f})**\n"
@@ -738,18 +736,80 @@ for i in range(max_len):
 
     with st.expander(f"🔎 {ticker} 상세(모델/뉴스) 보기"):
         st.write("**RandomForest 상태**:", rf_debug)
-
-        # ✅ 뉴스가 있을 때만 보여주기 (요청하신 ‘깔끔하게 숨김’)
         if titles:
             st.write("**뉴스 상태**:", news_debug)
             st.write("**최근 뉴스 제목(일부)**")
             for t in titles[:10]:
                 st.write(f"- {t}")
 
-# =========================================================
-# 7) 설정 JSON 저장/불러오기 (옵션: URL이 길어질 때 추천)
-# =========================================================
+    rows.append(
+        {
+            "Ticker": ticker,
+            "Currency": currency_label,
+            "Qty": qty,
+            "Buy_KRW": buy_price_krw,
+            "Now_KRW": current_krw,
+            "Eval_KRW": eval_krw,
+            "PnL_KRW": pnl_krw,
+            "Return_%": change_pct,
+            "AI_Score": ai_score,
+            "RF_Up_%": prob_pct,
+            "News_Sent": senti if titles else np.nan,
+        }
+    )
 
+# ---------------------------
+# ✅ 포트폴리오 전체 합산(총 평가금액/손익/비중 차트)
+# ---------------------------
+st.divider()
+st.subheader("📌 포트폴리오 합산")
+
+if len(rows) == 0:
+    st.info("표시할 포트폴리오 데이터가 없습니다. 종목 코드를 확인해 주세요.")
+else:
+    df = pd.DataFrame(rows)
+
+    total_eval = float(df["Eval_KRW"].sum())
+    total_pnl = float(df["PnL_KRW"].sum())
+    total_return = 0.0
+    if total_eval - total_pnl != 0:
+        # 총 매입금액 = 평가금액 - 손익
+        total_buy = total_eval - total_pnl
+        total_return = (total_pnl / total_buy) * 100.0 if total_buy != 0 else 0.0
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("총 평가금액(원화)", fmt_krw(total_eval))
+    c2.metric("총 평가손익(원화)", fmt_krw(total_pnl))
+    c3.metric("총 수익률(원화 기준)", f"{total_return:.2f}%")
+
+    # 테이블
+    show_cols = ["Ticker", "Currency", "Qty", "Buy_KRW", "Now_KRW", "Eval_KRW", "PnL_KRW", "Return_%", "AI_Score", "RF_Up_%"]
+    st.dataframe(
+        df[show_cols].sort_values("Eval_KRW", ascending=False),
+        use_container_width=True,
+    )
+
+    # 비중(평가금액) 파이차트
+    st.subheader("비중 차트 (평가금액 기준)")
+    pie_df = df[df["Eval_KRW"] > 0].copy()
+    if len(pie_df) == 0 or total_eval <= 0:
+        st.info("비중 차트를 그릴 데이터가 없습니다(평가금액이 0이거나 음수).")
+    else:
+        fig1 = plt.figure()
+        plt.pie(pie_df["Eval_KRW"], labels=pie_df["Ticker"], autopct="%1.1f%%")
+        plt.axis("equal")
+        st.pyplot(fig1)
+
+    # 손익 바차트
+    st.subheader("손익 차트 (원화)")
+    fig2 = plt.figure()
+    plt.bar(df["Ticker"], df["PnL_KRW"])
+    plt.xticks(rotation=30, ha="right")
+    st.pyplot(fig2)
+
+# =========================================================
+# 8) 설정 JSON 저장/불러오기
+# =========================================================
 with st.expander("💾 설정 JSON 저장/불러오기 (URL이 길어질 때 추천)"):
     current_settings = {
         "tickers_input": st.session_state["tickers_input"],
