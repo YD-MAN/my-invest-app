@@ -1,24 +1,33 @@
 # app.py
-# ✅ 완성본: 원화 평단가 입력 + 국내/해외(USD→KRW 환산) 표시
-# ✅ RandomForest 다음 거래일 상승확률 + 뉴스(제목) 감성 반영
-# ✅ 입력값 자동 URL 저장 + Reset 정상 동작(콜백 내 rerun 금지 패턴)
+# =========================================================
+# AI 포트폴리오 매니저 Pro (완성본)
+# - 원화 평단가 입력 + 국내/해외 통화표시 + 원화 손익
+# - RandomForest 상승확률 + 뉴스 감성(ETF/지수 키워드 대체 + NewsAPI 보강)
+# - 한국어 감성(Transformer) 자동 적용(가능할 때)
+# - 입력 자동 URL 저장 + Reset + 설정 JSON 저장/불러오기
+# =========================================================
 
 import json
+import re
 from urllib.parse import quote_plus, unquote_plus
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 import yfinance as yf
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
+# ---------------------------
+# Streamlit 기본
+# ---------------------------
 st.set_page_config(page_title="AI 포트폴리오 매니저 Pro", layout="wide")
 st.title("📊 AI 포트폴리오 매니저 Pro")
 
 # =========================================================
-# 0) 자동 URL 저장 입력부 (전략 B 자동 저장 + Reset)
+# 0) 자동 URL 저장 입력부 (전략 B 자동 저장 + Reset + 안전 로드)
 # =========================================================
 
 DEFAULT_TICKERS = "AAPL, MSFT, NVDA, 005930.KS, BTC-KRW"
@@ -60,6 +69,30 @@ def enc(s: str) -> str:
     return quote_plus(s)
 
 
+def mark_dirty():
+    st.session_state["__qp_dirty__"] = True
+
+
+def request_reset():
+    st.session_state["__reset_requested__"] = True
+
+
+def request_apply_loaded_settings(payload: dict):
+    # 콜백/업로드 타이밍에서 바로 rerun하지 말고 플래그로 처리
+    st.session_state["__loaded_settings__"] = payload
+    st.session_state["__apply_loaded_settings__"] = True
+
+
+# 초기 플래그들
+if "__qp_dirty__" not in st.session_state:
+    st.session_state["__qp_dirty__"] = False
+if "__reset_requested__" not in st.session_state:
+    st.session_state["__reset_requested__"] = False
+if "__apply_loaded_settings__" not in st.session_state:
+    st.session_state["__apply_loaded_settings__"] = False
+if "__loaded_settings__" not in st.session_state:
+    st.session_state["__loaded_settings__"] = {}
+
 # 초기값: URL → session_state (최초 1회)
 qp = get_qp()
 init_tickers = qp_get_str(qp, "tickers", DEFAULT_TICKERS)
@@ -73,21 +106,7 @@ if "buy_prices_input" not in st.session_state:
 if "quantities_input" not in st.session_state:
     st.session_state["quantities_input"] = init_qty
 
-if "__qp_dirty__" not in st.session_state:
-    st.session_state["__qp_dirty__"] = False
-if "__reset_requested__" not in st.session_state:
-    st.session_state["__reset_requested__"] = False
-
-
-def mark_dirty():
-    st.session_state["__qp_dirty__"] = True
-
-
-def request_reset():
-    st.session_state["__reset_requested__"] = True
-
-
-# Reset 처리: 콜백 밖에서 실행 (여기서 rerun 가능)
+# ✅ Reset 처리: 콜백 밖에서 실행
 if st.session_state["__reset_requested__"]:
     for k in ["tickers_input", "buy_prices_input", "quantities_input"]:
         if k in st.session_state:
@@ -103,6 +122,26 @@ if st.session_state["__reset_requested__"]:
     st.session_state["__reset_requested__"] = False
     st.rerun()
 
+# ✅ JSON 업로드로 불러오기 적용: 콜백 밖에서 실행
+if st.session_state["__apply_loaded_settings__"]:
+    loaded = st.session_state.get("__loaded_settings__", {}) or {}
+    t = str(loaded.get("tickers_input", DEFAULT_TICKERS))
+    b = str(loaded.get("buy_prices_input", DEFAULT_BUYPRICES))
+    q = str(loaded.get("quantities_input", DEFAULT_QTYS))
+
+    for k in ["tickers_input", "buy_prices_input", "quantities_input"]:
+        if k in st.session_state:
+            del st.session_state[k]
+
+    set_qp(tickers=enc(t), buy=enc(b), qty=enc(q))
+
+    st.session_state["__apply_loaded_settings__"] = False
+    st.session_state["__loaded_settings__"] = {}
+    st.rerun()
+
+# ---------------------------
+# 입력 UI
+# ---------------------------
 st.subheader("입력 (자동 URL 저장)")
 col1, col2, col3, col4 = st.columns([3, 3, 3, 1])
 
@@ -120,7 +159,7 @@ with col4:
     st.write("")
     st.button("Reset", on_click=request_reset)
 
-# 자동 URL 저장 (dirty일 때만, 다를 때만 set_qp)
+# ✅ 자동 URL 저장 (dirty일 때만, 다를 때만 set_qp)
 if st.session_state["__qp_dirty__"]:
     desired_t = enc(st.session_state["tickers_input"])
     desired_b = enc(st.session_state["buy_prices_input"])
@@ -146,7 +185,7 @@ if st.session_state["__qp_dirty__"]:
 st.caption("✅ 입력 변경 시 자동으로 URL에 저장됩니다. 새로고침/재접속/공유해도 동일 입력 유지")
 
 # =========================================================
-# 1) 입력값을 기존 로직에 연결
+# 1) 입력값 파싱
 # =========================================================
 
 tickers_input = st.session_state["tickers_input"]
@@ -181,7 +220,7 @@ while len(quantities) < max_len:
     quantities.append(0.0)
 
 # =========================================================
-# 2) 데이터 유틸 (Close 추출/통화 판단/표시)
+# 2) 유틸: Close 추출/통화 판별/표시
 # =========================================================
 
 
@@ -227,7 +266,6 @@ def is_korea_ticker(ticker: str) -> bool:
 
 
 def is_crypto_ticker(ticker: str) -> bool:
-    # 예: BTC-USD, BTC-KRW
     return "-" in ticker and (ticker.endswith("-USD") or ticker.endswith("-KRW"))
 
 
@@ -255,7 +293,6 @@ def get_usdkrw_rate() -> float:
 usdkrw = get_usdkrw_rate()
 if usdkrw == 0.0:
     st.warning("USD/KRW 환율을 가져오지 못했습니다. 해외 종목 환산 KRW가 0으로 표시될 수 있어요.")
-
 
 # =========================================================
 # 3) 기술지표 + 점수
@@ -293,12 +330,9 @@ def rsi(series: pd.Series, window: int = 14) -> pd.Series:
     rs = ma_up / (ma_down.replace(0, np.nan))
     return 100 - (100 / (1 + rs))
 
-
 # =========================================================
-# 4) RandomForest 상승확률 + 뉴스 감성
+# 4) RandomForest 상승확률
 # =========================================================
-
-analyzer = SentimentIntensityAnalyzer()
 
 
 @st.cache_data(ttl=60 * 60)
@@ -362,41 +396,231 @@ def rf_up_probability(ticker: str) -> tuple[float, dict]:
     debug["train_rows"] = int(len(X_train))
     return prob_up, debug
 
+# =========================================================
+# 5) 뉴스 강화: ETF/지수 키워드 대체 + NewsAPI + 한국어 감성(고성능)
+# =========================================================
+
+analyzer = SentimentIntensityAnalyzer()
+
+# 사이드바 옵션 (무거운 기능은 사용자가 끌 수 있게)
+with st.sidebar:
+    st.header("⚙️ 뉴스/감성 옵션")
+    ENABLE_NEWSAPI = st.toggle("NewsAPI 보강 사용", value=True)
+    ENABLE_KO_TRANSFORMER = st.toggle("한국어 감성(Transformer) 사용", value=True)
+    st.caption("한국어 감성은 무거울 수 있어요. 느리면 꺼도 됩니다.")
+
+# 한국어 감성 모델(멀티링구얼, “가능할 때” 자동 사용)
+KOREAN_SENTIMENT_MODEL = "nlptown/bert-base-multilingual-uncased-sentiment"
+
+
+def get_newsapi_key() -> str:
+    try:
+        return st.secrets.get("NEWSAPI_KEY", "")
+    except Exception:
+        return ""
+
+
+NEWSAPI_KEY = get_newsapi_key()
+
+
+@st.cache_data(ttl=60 * 60)
+def guess_quote_type(ticker: str) -> str:
+    try:
+        info = yf.Ticker(ticker).info
+        qt = (info.get("quoteType") or "").upper()
+        return qt if qt else "UNKNOWN"
+    except Exception:
+        return "UNKNOWN"
+
+
+def is_index_ticker(ticker: str) -> bool:
+    return ticker.startswith("^")
+
+
+def is_etf_or_index(ticker: str) -> bool:
+    if is_index_ticker(ticker):
+        return True
+    qt = guess_quote_type(ticker)
+    return qt in {"ETF", "INDEX", "MUTUALFUND"}
+
 
 @st.cache_data(ttl=60 * 30)
-def news_sentiment_score(ticker: str, max_items: int = 12) -> tuple[float, list[str], dict]:
-    debug = {"status": "ok"}
-    used_titles: list[str] = []
+def get_keyword_for_news(ticker: str) -> str:
+    try:
+        info = yf.Ticker(ticker).info
+        name = info.get("longName") or info.get("shortName") or ""
+        name = str(name).strip()
+        if name:
+            return name
+    except Exception:
+        pass
 
+    if ticker.startswith("^"):
+        return ticker[1:]
+    return ticker
+
+
+@st.cache_data(ttl=60 * 20)
+def newsapi_everything(query: str, language: str | None = None, page_size: int = 20) -> tuple[list[str], dict]:
+    if not (ENABLE_NEWSAPI and NEWSAPI_KEY):
+        if not NEWSAPI_KEY and ENABLE_NEWSAPI:
+            return [], {"status": "no_newsapi_key"}
+        return [], {"status": "newsapi_disabled"}
+
+    url = "https://newsapi.org/v2/everything"
+    params = {
+        "q": query,
+        "pageSize": page_size,
+        "sortBy": "publishedAt",
+        "apiKey": NEWSAPI_KEY,
+    }
+    if language:
+        params["language"] = language
+
+    try:
+        r = requests.get(url, params=params, timeout=8)
+        data = r.json()
+        if data.get("status") != "ok":
+            return [], {"status": "newsapi_error", "message": data.get("message", "")}
+
+        titles = []
+        for a in data.get("articles", [])[:page_size]:
+            t = (a.get("title") or "").strip()
+            if t:
+                titles.append(t)
+
+        if not titles:
+            return [], {"status": "newsapi_no_titles"}
+        return titles, {"status": "ok", "count": len(titles)}
+    except Exception as e:
+        return [], {"status": "newsapi_fail", "error": str(e)}
+
+
+def detect_language_simple(text: str) -> str:
+    if re.search(r"[가-힣]", text):
+        return "ko"
+    return "en"
+
+
+@st.cache_resource
+def get_ko_sentiment_pipe():
+    # transformers/torch가 설치되지 않았으면 예외 → 호출부에서 처리
+    from transformers import pipeline
+    return pipeline("sentiment-analysis", model=KOREAN_SENTIMENT_MODEL)
+
+
+def stars_to_compound(label: str) -> float:
+    m = re.search(r"(\d)", label)
+    if not m:
+        return 0.0
+    stars = int(m.group(1))  # 1~5
+    return (stars - 3) / 2.0  # 1->-1, 3->0, 5->+1
+
+
+def sentiment_compound_from_titles(titles: list[str]) -> tuple[float, str]:
+    if not titles:
+        return 0.0, "중립"
+
+    titles = titles[:10]
+    joined = " ".join(titles[:3])
+    lang = detect_language_simple(joined)
+
+    if lang == "en":
+        scores = []
+        for t in titles:
+            s = analyzer.polarity_scores(t).get("compound", 0.0)
+            scores.append(float(s))
+        comp = float(np.mean(scores)) if scores else 0.0
+    else:
+        # 한국어/비영어: Transformer(가능할 때)
+        if not ENABLE_KO_TRANSFORMER:
+            comp = 0.0
+        else:
+            try:
+                pipe = get_ko_sentiment_pipe()
+                preds = pipe(titles)
+                vals = []
+                for p in preds:
+                    label = str(p.get("label", ""))
+                    vals.append(stars_to_compound(label))
+                comp = float(np.mean(vals)) if vals else 0.0
+            except Exception:
+                # torch/transformers 미설치 또는 리소스 부족이면 안전하게 중립 처리
+                comp = 0.0
+
+    if comp > 0.05:
+        lab = "긍정"
+    elif comp < -0.05:
+        lab = "부정"
+    else:
+        lab = "중립"
+
+    return comp, lab
+
+
+@st.cache_data(ttl=60 * 20)
+def news_sentiment_score(ticker: str, max_items: int = 12) -> tuple[float, list[str], dict]:
+    """
+    return: (sentiment_score(-1~+1), titles, debug)
+    - yfinance 뉴스 → 타이틀 없으면 ETF/지수는 키워드로 NewsAPI 대체
+    - 그래도 없으면 titles=[]로 반환 (UI에서 숨김 처리)
+    """
+    # 1) yfinance 티커 뉴스 우선
     try:
         t = yf.Ticker(ticker)
         news = getattr(t, "news", None)
-        if not news:
-            return 0.0, [], {"status": "no_news"}
-    except Exception as e:
-        return 0.0, [], {"status": f"news_fail: {e}"}
+    except Exception:
+        news = None
 
-    scores: list[float] = []
-    count = 0
-    for item in news:
-        if count >= max_items:
-            break
-        title = item.get("title", "")
-        if not title:
-            continue
-        used_titles.append(title)
-        s = analyzer.polarity_scores(title).get("compound", 0.0)
-        scores.append(float(s))
-        count += 1
+    titles: list[str] = []
+    if news:
+        for item in news[:max_items]:
+            title = (item.get("title") or "").strip()
+            if title:
+                titles.append(title)
 
-    if len(scores) == 0:
-        return 0.0, used_titles, {"status": "no_valid_titles"}
+    # 2) yfinance 타이틀이 없으면(= no_valid_titles) → NewsAPI fallback
+    if len(titles) == 0:
+        if is_etf_or_index(ticker):
+            kw = get_keyword_for_news(ticker)
 
-    return float(np.mean(scores)), used_titles, debug
+            titles_en, dbg_en = newsapi_everything(kw, language="en", page_size=max_items)
+            if titles_en:
+                comp, lab = sentiment_compound_from_titles(titles_en)
+                return comp, titles_en, {"status": "fallback_newsapi_etf_index", "keyword": kw, "lang": "en", "label": lab, **dbg_en}
 
+            titles_ko, dbg_ko = newsapi_everything(kw, language="ko", page_size=max_items)
+            if titles_ko:
+                comp, lab = sentiment_compound_from_titles(titles_ko)
+                return comp, titles_ko, {"status": "fallback_newsapi_etf_index", "keyword": kw, "lang": "ko", "label": lab, **dbg_ko}
+
+            return 0.0, [], {"status": "no_news_after_fallback", "keyword": kw, "quoteType": guess_quote_type(ticker)}
+
+        # 일반 종목도 NewsAPI로 보강하고 싶으면 True
+        USE_NEWSAPI_FOR_STOCKS_TOO = True
+        if USE_NEWSAPI_FOR_STOCKS_TOO:
+            kw = get_keyword_for_news(ticker)
+
+            titles_en, dbg_en = newsapi_everything(kw, language="en", page_size=max_items)
+            if titles_en:
+                comp, lab = sentiment_compound_from_titles(titles_en)
+                return comp, titles_en, {"status": "fallback_newsapi_stock", "keyword": kw, "lang": "en", "label": lab, **dbg_en}
+
+            titles_ko, dbg_ko = newsapi_everything(kw, language="ko", page_size=max_items)
+            if titles_ko:
+                comp, lab = sentiment_compound_from_titles(titles_ko)
+                return comp, titles_ko, {"status": "fallback_newsapi_stock", "keyword": kw, "lang": "ko", "label": lab, **dbg_ko}
+
+            return 0.0, [], {"status": "no_news_after_fallback", "keyword": kw, "quoteType": guess_quote_type(ticker)}
+
+        return 0.0, [], {"status": "no_valid_titles"}
+
+    # 3) yfinance 타이틀이 있으면 감성분석 수행
+    comp, lab = sentiment_compound_from_titles(titles)
+    return comp, titles, {"status": "ok", "source": "yfinance", "label": lab, "count": len(titles)}
 
 # =========================================================
-# 5) 출력
+# 6) 분석 결과 출력
 # =========================================================
 
 st.divider()
@@ -476,13 +700,19 @@ for i in range(max_len):
         color = "gray"
         arrow = ""
 
-    # 업그레이드 AI
+    # RF + 뉴스
     prob_up, rf_debug = rf_up_probability(ticker)
     senti, titles, news_debug = news_sentiment_score(ticker)
+
     ai_score = upgraded_ai_score(trend, volatility, momentum, prob_up, senti)
 
     prob_pct = prob_up * 100.0
     senti_label = "긍정" if senti > 0.05 else ("부정" if senti < -0.05 else "중립")
+
+    # ✅ 뉴스가 없으면 뉴스 라인 자체를 숨김
+    news_line = ""
+    if titles:
+        news_line = f"- 뉴스 감성(제목 기반): **{senti_label} ({senti:+.2f})**\n"
 
     st.markdown(
         f"""
@@ -501,26 +731,25 @@ for i in range(max_len):
 
 **AI 점수(업그레이드): {ai_score}점**  
 - RF 상승확률(다음 거래일): **{prob_pct:.1f}%**
-- 뉴스 감성(제목 기반): **{senti_label} ({senti:+.2f})**
-- 리스크(변동성): **{risk}**
+{news_line}- 리스크(변동성): **{risk}**
 """,
         unsafe_allow_html=True,
     )
 
     with st.expander(f"🔎 {ticker} 상세(모델/뉴스) 보기"):
         st.write("**RandomForest 상태**:", rf_debug)
-        st.write("**뉴스 상태**:", news_debug)
+
+        # ✅ 뉴스가 있을 때만 보여주기 (요청하신 ‘깔끔하게 숨김’)
         if titles:
+            st.write("**뉴스 상태**:", news_debug)
             st.write("**최근 뉴스 제목(일부)**")
             for t in titles[:10]:
                 st.write(f"- {t}")
-        else:
-            st.write("가져온 뉴스 제목이 없습니다.")
-
 
 # =========================================================
-# 6) 설정 파일 저장/불러오기 (옵션)
+# 7) 설정 JSON 저장/불러오기 (옵션: URL이 길어질 때 추천)
 # =========================================================
+
 with st.expander("💾 설정 JSON 저장/불러오기 (URL이 길어질 때 추천)"):
     current_settings = {
         "tickers_input": st.session_state["tickers_input"],
@@ -540,17 +769,7 @@ with st.expander("💾 설정 JSON 저장/불러오기 (URL이 길어질 때 추
     if uploaded is not None:
         try:
             loaded = json.loads(uploaded.read().decode("utf-8"))
-            # 위젯 key는 위젯 생성 후 직접 대입하면 꼬일 수 있어 삭제 후 rerun 패턴 사용
-            for k in ["tickers_input", "buy_prices_input", "quantities_input"]:
-                if k in st.session_state:
-                    del st.session_state[k]
-
-            set_qp(
-                tickers=enc(str(loaded.get("tickers_input", DEFAULT_TICKERS))),
-                buy=enc(str(loaded.get("buy_prices_input", DEFAULT_BUYPRICES))),
-                qty=enc(str(loaded.get("quantities_input", DEFAULT_QTYS))),
-            )
-            st.success("설정을 불러왔습니다. 화면을 갱신합니다.")
-            st.rerun()
+            request_apply_loaded_settings(loaded)
+            st.success("설정을 불러왔습니다. 적용을 위해 화면을 갱신합니다.")
         except Exception as e:
             st.error(f"설정 파일을 읽는 중 오류: {e}")
