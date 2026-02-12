@@ -2,7 +2,9 @@ streamlit
 yfinance
 pandas
 numpy
-plotly
 scikit-learn
-tensorflow
 vaderSentiment
+requests
+transformers
+torch
+sentencepiece
