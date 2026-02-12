@@ -1,12 +1,12 @@
 # app.py
 # =========================================================
 # AI 포트폴리오 매니저 Pro (최종)
+# - URL + localStorage 하이브리드 입력 저장/복원(완전 자동)
 # - 원화 평단가 입력 + 국내/해외 통화 표시 + 원화 손익
+# - 환율 안정화 + 수동 환율 오버라이드
 # - RandomForest 상승확률 + 뉴스 감성(ETF/지수 키워드 대체 + NewsAPI 보강)
 # - 한국어 감성(Transformer) 가능할 때 자동 적용
-# - 입력 자동 URL 저장 + Reset + 설정 JSON 저장/불러오기
-# - 포트폴리오 합산(총 평가금액/손익/비중 차트)
-#   ※ matplotlib 없이 Streamlit 내장 차트만 사용(추가 설치 불필요)
+# - 포트폴리오 합산(총 평가금액/손익/비중/손익 차트) - Streamlit 내장 차트(추가 설치 無)
 # =========================================================
 
 import json
@@ -22,6 +22,14 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
+# ✅ localStorage용(없어도 앱이 죽지 않게 try/except)
+HAS_JS_EVAL = False
+try:
+    from streamlit_js_eval import streamlit_js_eval
+    HAS_JS_EVAL = True
+except Exception:
+    HAS_JS_EVAL = False
+
 # ---------------------------
 # Streamlit 기본
 # ---------------------------
@@ -29,12 +37,14 @@ st.set_page_config(page_title="AI 포트폴리오 매니저 Pro", layout="wide")
 st.title("📊 AI 포트폴리오 매니저 Pro")
 
 # =========================================================
-# 0) 자동 URL 저장 입력부
+# 0) URL + localStorage 하이브리드 저장/복원
 # =========================================================
 
 DEFAULT_TICKERS = "AAPL, MSFT, NVDA, 005930.KS, BTC-KRW"
 DEFAULT_BUYPRICES = "150000, 300000, 400000, 70000, 50000000"
 DEFAULT_QTYS = "10, 5, 3, 10, 0.01"
+
+LS_KEY = "ai_portfolio_manager_pro_v1"  # localStorage key (버전 바꾸면 새로 저장됨)
 
 
 def get_qp() -> dict:
@@ -84,6 +94,53 @@ def request_apply_loaded_settings(payload: dict):
     st.session_state["__apply_loaded_settings__"] = True
 
 
+def load_from_localstorage() -> dict:
+    """
+    localStorage에서 JSON 문자열을 읽어 dict로 반환.
+    streamlit-js-eval이 없으면 {} 반환.
+    """
+    if not HAS_JS_EVAL:
+        return {}
+    try:
+        raw = streamlit_js_eval(
+            js_expressions=f"localStorage.getItem('{LS_KEY}')",
+            want_output=True,
+            key="LS_GET",
+        )
+        if raw is None:
+            return {}
+        if isinstance(raw, str) and raw.strip() == "":
+            return {}
+        # raw가 JSON 문자열일 수 있음
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
+    except Exception:
+        return {}
+
+
+def save_to_localstorage(payload: dict):
+    """
+    localStorage에 JSON 저장.
+    streamlit-js-eval이 없으면 아무 것도 안 함.
+    """
+    if not HAS_JS_EVAL:
+        return
+    try:
+        # JS 문자열 안전하게 넣기 위해 JSON을 다시 dumps
+        s = json.dumps(payload, ensure_ascii=False)
+        # JS 문자열 리터럴로 안전하게 넣기(따옴표 이스케이프)
+        s_js = s.replace("\\", "\\\\").replace("'", "\\'")
+        streamlit_js_eval(
+            js_expressions=f"localStorage.setItem('{LS_KEY}', '{s_js}')",
+            want_output=False,
+            key="LS_SET",
+        )
+    except Exception:
+        pass
+
+
 # 플래그 초기화
 if "__qp_dirty__" not in st.session_state:
     st.session_state["__qp_dirty__"] = False
@@ -93,13 +150,30 @@ if "__apply_loaded_settings__" not in st.session_state:
     st.session_state["__apply_loaded_settings__"] = False
 if "__loaded_settings__" not in st.session_state:
     st.session_state["__loaded_settings__"] = {}
+if "__ls_bootstrapped__" not in st.session_state:
+    st.session_state["__ls_bootstrapped__"] = False
 
-# URL → state 초기값(최초 1회)
+# 1) URL 읽기
 qp = get_qp()
+url_has_any = ("tickers" in qp) or ("buy" in qp) or ("qty" in qp)
+
 init_tickers = qp_get_str(qp, "tickers", DEFAULT_TICKERS)
 init_buy = qp_get_str(qp, "buy", DEFAULT_BUYPRICES)
 init_qty = qp_get_str(qp, "qty", DEFAULT_QTYS)
 
+# 2) URL이 비어있거나 홈스크린에서 유실된 경우 → localStorage에서 복원(최초 1회만)
+#    - URL이 이미 있으면 URL을 우선(공유 링크/북마크 일관성)
+if (not url_has_any) and (not st.session_state["__ls_bootstrapped__"]):
+    ls_data = load_from_localstorage()
+    if isinstance(ls_data, dict) and ls_data.get("tickers_input") and ls_data.get("buy_prices_input") and ls_data.get("quantities_input"):
+        init_tickers = str(ls_data["tickers_input"])
+        init_buy = str(ls_data["buy_prices_input"])
+        init_qty = str(ls_data["quantities_input"])
+        # URL도 같이 맞춰주면 이후 공유/새로고침 일관성이 좋아짐
+        set_qp(tickers=enc(init_tickers), buy=enc(init_buy), qty=enc(init_qty))
+    st.session_state["__ls_bootstrapped__"] = True
+
+# 입력 state 초기값(최초 1회)
 if "tickers_input" not in st.session_state:
     st.session_state["tickers_input"] = init_tickers
 if "buy_prices_input" not in st.session_state:
@@ -107,22 +181,29 @@ if "buy_prices_input" not in st.session_state:
 if "quantities_input" not in st.session_state:
     st.session_state["quantities_input"] = init_qty
 
-# Reset(콜백 밖에서 처리)
+# Reset(콜백 밖)
 if st.session_state["__reset_requested__"]:
     for k in ["tickers_input", "buy_prices_input", "quantities_input"]:
         if k in st.session_state:
             del st.session_state[k]
 
-    set_qp(
-        tickers=enc(DEFAULT_TICKERS),
-        buy=enc(DEFAULT_BUYPRICES),
-        qty=enc(DEFAULT_QTYS),
+    # URL reset
+    set_qp(tickers=enc(DEFAULT_TICKERS), buy=enc(DEFAULT_BUYPRICES), qty=enc(DEFAULT_QTYS))
+
+    # localStorage reset도 같이
+    save_to_localstorage(
+        {
+            "tickers_input": DEFAULT_TICKERS,
+            "buy_prices_input": DEFAULT_BUYPRICES,
+            "quantities_input": DEFAULT_QTYS,
+        }
     )
+
     st.session_state["__qp_dirty__"] = False
     st.session_state["__reset_requested__"] = False
     st.rerun()
 
-# JSON 업로드 적용(콜백 밖에서 처리)
+# JSON 업로드 적용(콜백 밖)
 if st.session_state["__apply_loaded_settings__"]:
     loaded = st.session_state.get("__loaded_settings__", {}) or {}
     t = str(loaded.get("tickers_input", DEFAULT_TICKERS))
@@ -134,13 +215,16 @@ if st.session_state["__apply_loaded_settings__"]:
             del st.session_state[k]
 
     set_qp(tickers=enc(t), buy=enc(b), qty=enc(q))
+    save_to_localstorage({"tickers_input": t, "buy_prices_input": b, "quantities_input": q})
 
     st.session_state["__apply_loaded_settings__"] = False
     st.session_state["__loaded_settings__"] = {}
     st.rerun()
 
+# ---------------------------
 # 입력 UI
-st.subheader("입력 (자동 URL 저장)")
+# ---------------------------
+st.subheader("입력 (URL + localStorage 자동 저장)")
 col1, col2, col3, col4 = st.columns([3, 3, 3, 1])
 
 with col1:
@@ -157,7 +241,7 @@ with col4:
     st.write("")
     st.button("Reset", on_click=request_reset)
 
-# URL 자동 저장
+# URL 자동 저장(dirty일 때만)
 if st.session_state["__qp_dirty__"]:
     desired_t = enc(st.session_state["tickers_input"])
     desired_b = enc(st.session_state["buy_prices_input"])
@@ -180,7 +264,16 @@ if st.session_state["__qp_dirty__"]:
 
     st.session_state["__qp_dirty__"] = False
 
-st.caption("✅ 입력 변경 시 자동으로 URL에 저장됩니다. 새로고침/재접속/공유해도 동일 입력 유지")
+# ✅ localStorage는 매번(혹은 값 변경 직후) 저장해도 부담이 작아서 항상 최신으로 맞춤
+save_to_localstorage(
+    {
+        "tickers_input": st.session_state["tickers_input"],
+        "buy_prices_input": st.session_state["buy_prices_input"],
+        "quantities_input": st.session_state["quantities_input"],
+    }
+)
+
+st.caption("✅ URL과 브라우저(localStorage)에 동시에 저장됩니다. 모바일 홈스크린(북마크)에서도 입력 유지가 훨씬 안정적입니다.")
 
 # =========================================================
 # 1) 파싱
@@ -220,7 +313,6 @@ while len(quantities) < max_len:
 # =========================================================
 # 2) 유틸
 # =========================================================
-
 
 def extract_close_series(data: pd.DataFrame) -> pd.Series | None:
     if data is None or len(data) == 0:
@@ -274,14 +366,12 @@ def fmt_krw(x: float) -> str:
 def fmt_usd(x: float) -> str:
     return f"${x:,.2f}"
 
-
 # =========================================================
 # 3) 환율(USD/KRW) 안정화 + 수동 오버라이드
 # =========================================================
 
 @st.cache_data(ttl=60 * 30)
 def try_fetch_usdkrw() -> tuple[float, str]:
-    # 1) KRW=X download
     try:
         fx = yf.download("KRW=X", period="1mo", progress=False)
         c = extract_close_series(fx)
@@ -292,7 +382,6 @@ def try_fetch_usdkrw() -> tuple[float, str]:
     except Exception:
         pass
 
-    # 2) KRW=X history
     try:
         fx = yf.Ticker("KRW=X").history(period="1mo")
         c = extract_close_series(fx)
@@ -303,7 +392,6 @@ def try_fetch_usdkrw() -> tuple[float, str]:
     except Exception:
         pass
 
-    # 3) USDKRW=X download
     try:
         fx = yf.download("USDKRW=X", period="1mo", progress=False)
         c = extract_close_series(fx)
@@ -337,7 +425,7 @@ else:
     usdkrw_src_final = usdkrw_src
 
 if usdkrw == 0.0:
-    st.warning("USD/KRW 환율을 가져오지 못했습니다. (야후 응답/레이트리밋/일시적 빈 데이터 등) 해외 종목 환산 KRW가 0으로 표시될 수 있어요. 👉 사이드바에서 수동 환율 입력으로 해결 가능합니다.")
+    st.warning("USD/KRW 환율을 가져오지 못했습니다. 해외 종목 환산 KRW가 0으로 표시될 수 있어요. (사이드바 수동 환율 입력 가능)")
 else:
     st.info(f"USD/KRW 환율: {usdkrw:,.2f}  (source: {usdkrw_src_final})")
 
@@ -450,13 +538,16 @@ with st.sidebar:
 
 KOREAN_SENTIMENT_MODEL = "nlptown/bert-base-multilingual-uncased-sentiment"
 
+
 def get_newsapi_key() -> str:
     try:
         return st.secrets.get("NEWSAPI_KEY", "")
     except Exception:
         return ""
 
+
 NEWSAPI_KEY = get_newsapi_key()
+
 
 @st.cache_data(ttl=60 * 60)
 def guess_quote_type(ticker: str) -> str:
@@ -467,11 +558,13 @@ def guess_quote_type(ticker: str) -> str:
     except Exception:
         return "UNKNOWN"
 
+
 def is_etf_or_index(ticker: str) -> bool:
     if ticker.startswith("^"):
         return True
     qt = guess_quote_type(ticker)
     return qt in {"ETF", "INDEX", "MUTUALFUND"}
+
 
 @st.cache_data(ttl=60 * 30)
 def get_keyword_for_news(ticker: str) -> str:
@@ -484,6 +577,7 @@ def get_keyword_for_news(ticker: str) -> str:
     except Exception:
         pass
     return ticker[1:] if ticker.startswith("^") else ticker
+
 
 @st.cache_data(ttl=60 * 20)
 def newsapi_everything(query: str, language: str | None, page_size: int) -> tuple[list[str], dict]:
@@ -520,14 +614,16 @@ def newsapi_everything(query: str, language: str | None, page_size: int) -> tupl
     except Exception as e:
         return [], {"status": "newsapi_fail", "error": str(e)}
 
+
 def detect_language_simple(text: str) -> str:
     return "ko" if re.search(r"[가-힣]", text) else "en"
 
+
 @st.cache_resource
 def get_ko_sentiment_pipe():
-    # 설치 안되어도 앱이 죽지 않게 함수 내부 import
     from transformers import pipeline
     return pipeline("sentiment-analysis", model=KOREAN_SENTIMENT_MODEL)
+
 
 def stars_to_compound(label: str) -> float:
     m = re.search(r"(\d)", label)
@@ -535,6 +631,7 @@ def stars_to_compound(label: str) -> float:
         return 0.0
     stars = int(m.group(1))
     return (stars - 3) / 2.0
+
 
 def sentiment_compound_from_titles(titles: list[str]) -> tuple[float, str]:
     if not titles:
@@ -567,9 +664,9 @@ def sentiment_compound_from_titles(titles: list[str]) -> tuple[float, str]:
         lab = "중립"
     return comp, lab
 
+
 @st.cache_data(ttl=60 * 20)
 def news_sentiment_score(ticker: str, max_items: int = 12) -> tuple[float, list[str], dict]:
-    # 1) yfinance 뉴스
     try:
         news = getattr(yf.Ticker(ticker), "news", None)
     except Exception:
@@ -582,7 +679,6 @@ def news_sentiment_score(ticker: str, max_items: int = 12) -> tuple[float, list[
             if title:
                 titles.append(title)
 
-    # 2) 비면 fallback
     if len(titles) == 0:
         kw = get_keyword_for_news(ticker)
 
@@ -599,7 +695,6 @@ def news_sentiment_score(ticker: str, max_items: int = 12) -> tuple[float, list[
 
             return 0.0, [], {"status": "no_news_after_fallback", "keyword": kw, "quoteType": guess_quote_type(ticker)}
 
-        # 일반 종목도 보강
         USE_NEWSAPI_FOR_STOCKS_TOO = True
         if USE_NEWSAPI_FOR_STOCKS_TOO:
             t_en, dbg_en = newsapi_everything(kw, "en", max_items)
@@ -620,7 +715,7 @@ def news_sentiment_score(ticker: str, max_items: int = 12) -> tuple[float, list[
     return comp, titles, {"status": "ok", "source": "yfinance", "label": lab, "count": len(titles)}
 
 # =========================================================
-# 7) 분석 결과 + 포트폴리오 합산/차트
+# 7) 분석 + 포트폴리오 합산/차트
 # =========================================================
 
 st.divider()
@@ -636,7 +731,6 @@ for i in range(max_len):
     buy_price_krw = float(buy_prices_krw[i])
     qty = float(quantities[i])
 
-    # 3개월 가격
     try:
         data = yf.download(ticker, period="3mo", progress=False, auto_adjust=False)
     except Exception as e:
@@ -648,7 +742,6 @@ for i in range(max_len):
         st.warning(f"{ticker} 데이터 부족/종가 없음")
         continue
 
-    # 지표
     returns = close.pct_change().dropna()
     volatility = float(returns.std()) if len(returns) > 0 else 0.0
 
@@ -664,7 +757,6 @@ for i in range(max_len):
 
     risk = calculate_risk(volatility)
 
-    # 통화 변환
     if is_korea_ticker(ticker) or (is_crypto_ticker(ticker) and ticker.endswith("-KRW")):
         current_krw = current_native
         currency_label = "KRW"
@@ -677,7 +769,6 @@ for i in range(max_len):
         fx_line = f"환율(USD/KRW): {usdkrw:,.2f}  (source: {usdkrw_src_final})" if usdkrw > 0 else "환율(USD/KRW): 없음(수동 입력 필요)"
         price_line = f"현재가: {fmt_usd(current_usd)}  (환산 {fmt_krw(current_krw)})"
 
-    # 손익/수익률 (원화 기준)
     change_pct = 0.0 if buy_price_krw == 0.0 else ((current_krw - buy_price_krw) / buy_price_krw) * 100.0
     eval_krw = current_krw * qty
     pnl_krw = (current_krw - buy_price_krw) * qty if buy_price_krw != 0.0 else 0.0
@@ -685,7 +776,6 @@ for i in range(max_len):
     color = "red" if change_pct > 0 else ("blue" if change_pct < 0 else "gray")
     arrow = "▲" if change_pct > 0 else ("▼" if change_pct < 0 else "")
 
-    # AI 요소
     prob_up, rf_debug = rf_up_probability(ticker)
     senti, titles, news_debug = news_sentiment_score(ticker)
     ai_score = upgraded_ai_score(trend, volatility, momentum, prob_up, senti)
@@ -742,9 +832,6 @@ for i in range(max_len):
         }
     )
 
-# ---------------------------
-# 포트폴리오 합산 + 차트(내장)
-# ---------------------------
 st.divider()
 st.subheader("📌 포트폴리오 합산")
 
@@ -766,17 +853,14 @@ else:
     show_cols = ["Ticker", "Currency", "Qty", "Buy_KRW", "Now_KRW", "Eval_KRW", "PnL_KRW", "Return_%", "AI_Score", "RF_Up_%"]
     st.dataframe(df[show_cols].sort_values("Eval_KRW", ascending=False), use_container_width=True)
 
-    # 비중 차트(평가금액 기준) - bar
     st.subheader("비중 차트 (평가금액 기준)")
     w = df[["Ticker", "Eval_KRW"]].copy()
     w = w[w["Eval_KRW"] > 0].sort_values("Eval_KRW", ascending=False)
     if len(w) == 0:
         st.info("비중 차트를 그릴 데이터가 없습니다(평가금액이 0 이하).")
     else:
-        w = w.set_index("Ticker")
-        st.bar_chart(w, height=320)
+        st.bar_chart(w.set_index("Ticker"), height=320)
 
-    # 손익 차트 - bar
     st.subheader("손익 차트 (원화)")
     p = df[["Ticker", "PnL_KRW"]].copy().set_index("Ticker")
     st.bar_chart(p, height=320)
